@@ -1,9 +1,16 @@
 #include <iostream>
-#include <glm/glm.hpp>
+#include <src/game/game.h>
 
 int main(int argc, char* argv[])
 {
 
-    std::cout << " finished " << std::endl;
+    Game game;
+
+    game.init();
+
+    game.run();
+
+    game.end();
+
     return 0;
 }

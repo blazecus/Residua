@@ -15,6 +15,25 @@ set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
 add_executable (Waka
   src/main.cpp
+  src/game/input_manager.h
+  src/game/game.cpp
+  src/game/game.h
+  src/game/client.cpp
+  src/game/client.h
+  src/renderer/waka_engine.cpp
+  src/renderer/waka_engine.h
+  src/renderer/vk_types.h
+  src/renderer/vk_images.cpp
+  src/renderer/vk_images.h
+  src/renderer/vk_initializers.cpp
+  src/renderer/vk_initializers.h
+  src/renderer/compute_effects.h
+  src/renderer/vk_pipelines.cpp
+  src/renderer/vk_pipelines.h
+  src/renderer/vk_descriptors.cpp
+  src/renderer/vk_descriptors.h
+  src/renderer/vk_pipelines.cpp
+  src/renderer/vk_pipelines.h
 )
 
 set_property(TARGET Waka PROPERTY CXX_STANDARD 20)
