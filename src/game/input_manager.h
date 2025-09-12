@@ -260,6 +260,11 @@ public:
 		return inputs;
 	}
 
+	void resetMouse(SDL_Window* window) {
+		SDL_WarpMouseInWindow(window,0,0);
+		inputs.camera_movement = glm::vec2(0.0f);
+	}
+
 	void resetInput() {
 		inputs.camera_movement = glm::vec2(0.0f);
 	}

@@ -11,6 +11,7 @@ layout( push_constant ) uniform constants
  vec4 data2;
  vec4 data3;
  vec4 data4;
+ vec2 playerPos;
 } PushConstants;
 
 void main() 
@@ -21,6 +22,11 @@ void main()
 
     vec4 topColor = PushConstants.data1;
     vec4 bottomColor = PushConstants.data2;
+
+    if(length(PushConstants.playerPos - texelCoord) < 10){
+        imageStore(image, texelCoord, vec4(1.0));
+        return;
+    }
 
     if(texelCoord.x < size.x && texelCoord.y < size.y)
     {

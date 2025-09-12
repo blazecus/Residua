@@ -6,7 +6,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#define SDL_MAIN_HANDLED
 #include <SDL.h>
+#include <SDL_vulkan.h>
 
 #include "vk_types.h"
 #include "vk_images.h"
@@ -41,6 +44,7 @@ struct ComputePushConstants {
     glm::vec4 data2;
     glm::vec4 data3;
     glm::vec4 data4;
+    glm::vec2 playerPos;
 };
 
 struct ComputeEffect {
@@ -196,8 +200,9 @@ public:
 
     void process_renderer_input(SDL_Event& e);
 
-    void drawFrame();
+    void process_player_update(glm::vec2 position);
 
+    void draw_frame();
     //void add_render_object()
 
 private:

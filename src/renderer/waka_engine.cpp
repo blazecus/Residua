@@ -1,8 +1,6 @@
 ﻿#include <iostream>
 #include "waka_engine.h"
 
-#include <SDL.h>
-#include <SDL_vulkan.h>
 
 #include <VkBootstrap.h>
 
@@ -319,7 +317,12 @@ void WakaEngine::process_renderer_input(SDL_Event& e) {
     ImGui_ImplSDL2_ProcessEvent(&e);
 }
 
-void WakaEngine::drawFrame() {
+void WakaEngine::process_player_update(glm::vec2 player_pos) {
+	ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
+    selected.data.playerPos = player_pos;
+}
+
+void WakaEngine::draw_frame() {
     auto start = std::chrono::system_clock::now();
 
 	if (resize_requested) {
@@ -341,8 +344,7 @@ void WakaEngine::drawFrame() {
 	ImGui::End();
 
 	if (ImGui::Begin("background")) {
-
-		/*ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
+		ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
 
 		ImGui::Text("Selected effect: ", selected.name);
 
@@ -351,8 +353,7 @@ void WakaEngine::drawFrame() {
 		ImGui::InputFloat4("data1", (float*)&selected.data.data1);
 		ImGui::InputFloat4("data2", (float*)&selected.data.data2);
 		ImGui::InputFloat4("data3", (float*)&selected.data.data3);
-		ImGui::InputFloat4("data4", (float*)&selected.data.data4);
-        */
+		ImGui::InputFloat4("data4", (float*)&selected.data.data4); 
 
 		ImGui::End();
 	}
@@ -366,7 +367,7 @@ void WakaEngine::drawFrame() {
 	auto end = std::chrono::system_clock::now();
 	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-	// stats.frametime = elapsed.count() / 1000.f;
+	stats.frametime = elapsed.count() / 1000.f;
 }
 
 void WakaEngine::update_scene()

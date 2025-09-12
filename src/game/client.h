@@ -15,4 +15,6 @@ public:
 
 	void init();
 
+	void resetMouse(SDL_Window* window);
+
 };

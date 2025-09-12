@@ -1,5 +1,4 @@
 #include <src/game/game.h>
-#include <SDL.h>
 
 void Game::SDL_setup() {
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
@@ -8,6 +7,10 @@ void Game::SDL_setup() {
 
 	_window = SDL_CreateWindow("Graviator", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, _windowExtent.width,
 		_windowExtent.height, window_flags);
+
+	int32_t cursorData[2] = {0, 0};
+	cursor = SDL_CreateCursor((Uint8 *)cursorData, (Uint8 *)cursorData, 8, 8, 4, 4);
+	SDL_FreeCursor(cursor);
 }
 
 void Game::init() {
@@ -23,6 +26,7 @@ void Game::init() {
 void Game::run() {
     SDL_Event e;
     bool bQuit = false;
+	client.resetMouse(_window);
 
     // main loop
 	while (!bQuit) {
@@ -42,14 +46,26 @@ void Game::run() {
 					freeze_rendering = false;
 				}
             }
+			engine.process_renderer_input(e);
 			client.processSDLEvent(e);
+
+			//engine.process_player_update(temp_player_position / glm::vec2(_windowExtent.width, _windowExtent.height));
 		}
+
+		auto input = client.input_manager.getInputs();
+		glm::vec2 diff = glm::vec2(
+			input.flou(InputManager::InputType::RIGHT) - input.flou(InputManager::InputType::LEFT),
+			input.flou(InputManager::InputType::BACKWARD) - input.flou(InputManager::InputType::FORWARD)
+		) * 200.0f * delta;
+		std::cout << diff.x << " " << diff.y << std::endl;
+		temp_player_position += diff;
+		engine.process_player_update(temp_player_position);
+
 
 		client.update();
 
 		if (!freeze_rendering)
-			std::cout << "test" << std::endl;
-			engine.draw();
+			engine.draw_frame();
 			
 		std::chrono::microseconds elapsed{ 0 };
 		auto end = std::chrono::system_clock::now();
@@ -64,5 +80,6 @@ void Game::run() {
 
 void Game::end() {
 	//renderer.cleanup();
+	SDL_FreeCursor(cursor);
     SDL_DestroyWindow(_window);
 }

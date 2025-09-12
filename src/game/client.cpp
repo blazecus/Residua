@@ -15,3 +15,7 @@ void Client::update() {
 void Client::resetInput() {
     input_manager.resetInput();
 }
+
+void Client::resetMouse(SDL_Window* window) {
+    input_manager.resetMouse(window);
+}
