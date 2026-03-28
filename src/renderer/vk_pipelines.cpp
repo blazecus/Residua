@@ -194,42 +194,6 @@ void PipelineBuilder::set_color_attachment_format(VkFormat format)
     _renderInfo.pColorAttachmentFormats = &_colorAttachmentformat;
 }
 
-void PipelineBuilder::set_depth_format(VkFormat format)
-{
-    _renderInfo.depthAttachmentFormat = format;
-}
-//< set_formats
-
-//> depth_disable
-void PipelineBuilder::disable_depthtest()
-{
-    _depthStencil.depthTestEnable = VK_FALSE;
-    _depthStencil.depthWriteEnable = VK_FALSE;
-    _depthStencil.depthCompareOp = VK_COMPARE_OP_NEVER;
-    _depthStencil.depthBoundsTestEnable = VK_FALSE;
-    _depthStencil.stencilTestEnable = VK_FALSE;
-    _depthStencil.front = {};
-    _depthStencil.back = {};
-    _depthStencil.minDepthBounds = 0.f;
-    _depthStencil.maxDepthBounds = 1.f;
-}
-//< depth_disable
-
-//> depth_enable
-void PipelineBuilder::enable_depthtest(bool depthWriteEnable, VkCompareOp op)
-{
-    _depthStencil.depthTestEnable = VK_TRUE;
-    _depthStencil.depthWriteEnable = depthWriteEnable;
-    _depthStencil.depthCompareOp = op;
-    _depthStencil.depthBoundsTestEnable = VK_FALSE;
-    _depthStencil.stencilTestEnable = VK_FALSE;
-    _depthStencil.front = {};
-    _depthStencil.back = {};
-    _depthStencil.minDepthBounds = 0.f;
-    _depthStencil.maxDepthBounds = 1.f;
-}
-//< depth_enable
-
 //> load_shader
 bool vkutil::load_shader_module(const char* filePath,
     VkDevice device,

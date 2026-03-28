@@ -20,7 +20,7 @@ void Game::init() {
 
 	engine.init(_windowExtent, _window);
 
-	last_frame = std::chrono::system_clock::now();
+	lastFrame = std::chrono::system_clock::now();
 }
 
 void Game::run() {
@@ -52,7 +52,7 @@ void Game::run() {
 			//engine.process_player_update(temp_player_position / glm::vec2(_windowExtent.width, _windowExtent.height));
 		}
 
-		auto input = client.input_manager.getInputs();
+		auto input = client.inputManager.getInputs();
 		glm::vec2 diff = glm::vec2(
 			input.flou(InputManager::InputType::RIGHT) - input.flou(InputManager::InputType::LEFT),
 			input.flou(InputManager::InputType::BACKWARD) - input.flou(InputManager::InputType::FORWARD)
@@ -69,12 +69,12 @@ void Game::run() {
 			
 		std::chrono::microseconds elapsed{ 0 };
 		auto end = std::chrono::system_clock::now();
-		while (fps_limit && elapsed < frame_time) {
-			elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end-last_frame);
+		while (fpsLimit && elapsed < frameTime) {
+			elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end-lastFrame);
 			end = std::chrono::system_clock::now();
 		}
 
-		last_frame = end;
+		lastFrame = end;
 	}
 }
 

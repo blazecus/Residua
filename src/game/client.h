@@ -5,7 +5,7 @@
 class Client{
 public:
 
-	InputManager input_manager;
+	InputManager inputManager;
 
 	void update();
 

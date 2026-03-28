@@ -3,7 +3,7 @@
 #
 cmake_minimum_required (VERSION 3.8)
 
-project ("Waka")
+project ("Residua")
 
 find_package(Vulkan REQUIRED)
 
@@ -13,15 +13,15 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
 
-add_executable (Waka
+add_executable (Residua
   src/main.cpp
   src/game/input_manager.h
   src/game/game.cpp
   src/game/game.h
   src/game/client.cpp
   src/game/client.h
-  src/renderer/waka_engine.cpp
-  src/renderer/waka_engine.h
+  src/renderer/residua_engine.cpp
+  src/renderer/residua_engine.h
   src/renderer/vk_types.h
   src/renderer/vk_images.cpp
   src/renderer/vk_images.h
@@ -36,17 +36,17 @@ add_executable (Waka
   src/renderer/vk_pipelines.h
 )
 
-set_property(TARGET Waka PROPERTY CXX_STANDARD 20)
-target_compile_definitions(Waka PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
+target_compile_definitions(Residua PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
-target_include_directories(Waka PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(Residua PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
-target_link_libraries(Waka PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
+target_link_libraries(Residua PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
 
-target_precompile_headers(Waka PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
+target_precompile_headers(Residua PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 
-add_custom_command(TARGET Waka POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:Waka> $<TARGET_FILE_DIR:Waka>
+add_custom_command(TARGET Residua POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:Residua> $<TARGET_FILE_DIR:Residua>
   COMMAND_EXPAND_LISTS
   )
 

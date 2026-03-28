@@ -1,5 +1,5 @@
 ﻿#include <iostream>
-#include "waka_engine.h"
+#include "residua_engine.h"
 
 
 #include <VkBootstrap.h>
@@ -15,14 +15,14 @@
 
 constexpr bool bUseValidationLayers = false;
 
-WakaEngine* loadedEngine = nullptr;
+ResiduaEngine* loadedEngine = nullptr;
 
-WakaEngine& WakaEngine::Get()
+ResiduaEngine& ResiduaEngine::Get()
 {
     return *loadedEngine;
 }
 
-void WakaEngine::init(
+void ResiduaEngine::init(
     VkExtent2D windowExtent,
     struct SDL_Window* window
 ) {
@@ -53,47 +53,14 @@ void WakaEngine::init(
     _isInitialized = true;
 }
 
-void WakaEngine::init_pipelines()
+void ResiduaEngine::init_pipelines()
 {
     // COMPUTE PIPELINES
     init_background_pipelines();
 
 }
 
-void WakaEngine::init_default_data() {
-    std::array<Vertex, 4> rect_vertices;
-
-    rect_vertices[0].position = { 0.5,-0.5, 0 };
-    rect_vertices[1].position = { 0.5,0.5, 0 };
-    rect_vertices[2].position = { -0.5,-0.5, 0 };
-    rect_vertices[3].position = { -0.5,0.5, 0 };
-
-    rect_vertices[0].color = { 0,0, 0,1 };
-    rect_vertices[1].color = { 0.5,0.5,0.5 ,1 };
-    rect_vertices[2].color = { 1,0, 0,1 };
-    rect_vertices[3].color = { 0,1, 0,1 };
-
-    rect_vertices[0].uv_x = 1;
-    rect_vertices[0].uv_y = 0;
-    rect_vertices[1].uv_x = 0;
-    rect_vertices[1].uv_y = 0;
-    rect_vertices[2].uv_x = 1;
-    rect_vertices[2].uv_y = 1;
-    rect_vertices[3].uv_x = 0;
-    rect_vertices[3].uv_y = 1;
-
-    std::array<uint32_t, 6> rect_indices;
-
-    rect_indices[0] = 0;
-    rect_indices[1] = 1;
-    rect_indices[2] = 2;
-
-    rect_indices[3] = 2;
-    rect_indices[4] = 1;
-    rect_indices[5] = 3;
-
-    rectangle = uploadMesh(rect_indices, rect_vertices);
-
+void ResiduaEngine::init_default_data() {
     //3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
     _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
@@ -131,7 +98,7 @@ void WakaEngine::init_default_data() {
     vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerLinear);
 }
 
-void WakaEngine::cleanup()
+void ResiduaEngine::cleanup()
 {
     if (_isInitialized) {
 
@@ -156,7 +123,7 @@ void WakaEngine::cleanup()
     }
 }
 
-void WakaEngine::draw_main(VkCommandBuffer cmd)
+void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 {
 	ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
@@ -170,26 +137,9 @@ void WakaEngine::draw_main(VkCommandBuffer cmd)
 	// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
 	vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
 
-	//draw the triangle
-
-	VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(_drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_GENERAL);
-	VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-
-	VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
-
-	vkCmdBeginRendering(cmd, &renderInfo);
-	auto start = std::chrono::system_clock::now();
-	draw_geometry(cmd);
-
-	auto end = std::chrono::system_clock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-	stats.mesh_draw_time = elapsed.count() / 1000.f;
-
-	vkCmdEndRendering(cmd);
 }
 
-void WakaEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
+void ResiduaEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 {
 	VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(targetImageView, nullptr, VK_IMAGE_LAYOUT_GENERAL);
 	VkRenderingInfo renderInfo = vkinit::rendering_info(_windowExtent, &colorAttachment, nullptr);
@@ -201,7 +151,7 @@ void WakaEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 	vkCmdEndRendering(cmd);
 }
 
-void WakaEngine::draw()
+void ResiduaEngine::draw()
 {
 	//wait until the gpu has finished rendering the last frame. Timeout of 1 second
 	VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
@@ -234,7 +184,6 @@ void WakaEngine::draw()
 	// transition our main draw image into general layout so we can write into it
 	// we will overwrite it all so we dont care about what was the older layout
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-    vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
 	draw_main(cmd);
 
@@ -245,7 +194,6 @@ void WakaEngine::draw()
 	VkExtent2D extent;
 	extent.height = _windowExtent.height;
 	extent.width = _windowExtent.width;
-	//extent.depth = 1;
 
 	// execute a copy from the draw image into the swapchain
 	vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent,_swapchainExtent);
@@ -300,12 +248,7 @@ void WakaEngine::draw()
 	_frameNumber++;
 }
 
-void WakaEngine::draw_geometry(VkCommandBuffer cmd)
-{
-    // no geometry logic for now
-}
-
-void WakaEngine::process_renderer_input(SDL_Event& e) {
+void ResiduaEngine::process_renderer_input(SDL_Event& e) {
 
 	if (e.type == SDL_WINDOWEVENT) {
 
@@ -317,12 +260,12 @@ void WakaEngine::process_renderer_input(SDL_Event& e) {
     ImGui_ImplSDL2_ProcessEvent(&e);
 }
 
-void WakaEngine::process_player_update(glm::vec2 player_pos) {
+void ResiduaEngine::process_player_update(glm::vec2 player_pos) {
 	ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
     selected.data.playerPos = player_pos;
 }
 
-void WakaEngine::draw_frame() {
+void ResiduaEngine::draw_frame() {
     auto start = std::chrono::system_clock::now();
 
 	if (resize_requested) {
@@ -370,12 +313,12 @@ void WakaEngine::draw_frame() {
 	stats.frametime = elapsed.count() / 1000.f;
 }
 
-void WakaEngine::update_scene()
+void ResiduaEngine::update_scene()
 {
     // TODO
 }
 
-AllocatedBuffer WakaEngine::create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage)
+AllocatedBuffer ResiduaEngine::create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage)
 {
     // allocate buffer
     VkBufferCreateInfo bufferInfo = {};
@@ -397,7 +340,7 @@ AllocatedBuffer WakaEngine::create_buffer(size_t allocSize, VkBufferUsageFlags u
     return newBuffer;
 }
 
-AllocatedImage WakaEngine::create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
+AllocatedImage ResiduaEngine::create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
 {
     AllocatedImage newImage;
     newImage.imageFormat = format;
@@ -432,7 +375,7 @@ AllocatedImage WakaEngine::create_image(VkExtent3D size, VkFormat format, VkImag
     return newImage;
 }
 
-void WakaEngine::init_background_pipelines()
+void ResiduaEngine::init_background_pipelines()
 {
     VkPipelineLayoutCreateInfo computeLayout{};
     computeLayout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -510,7 +453,7 @@ void WakaEngine::init_background_pipelines()
         });
 }
 
-AllocatedImage WakaEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
+AllocatedImage ResiduaEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
 {
     size_t data_size = size.depth * size.width * size.height * 4;
     AllocatedBuffer uploadbuffer = create_buffer(data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -548,17 +491,17 @@ AllocatedImage WakaEngine::create_image(void* data, VkExtent3D size, VkFormat fo
     return new_image;
 }
 
-FrameData& WakaEngine::get_current_frame()
+FrameData& ResiduaEngine::get_current_frame()
 {
     return _frames[_frameNumber % FRAME_OVERLAP];
 }
 
-FrameData& WakaEngine::get_last_frame()
+FrameData& ResiduaEngine::get_last_frame()
 {
     return _frames[(_frameNumber - 1) % FRAME_OVERLAP];
 }
 
-void WakaEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function)
+void ResiduaEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function)
 {
     VK_CHECK(vkResetFences(_device, 1, &_immFence));
     VK_CHECK(vkResetCommandBuffer(_immCommandBuffer, 0));
@@ -584,18 +527,18 @@ void WakaEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& fun
     VK_CHECK(vkWaitForFences(_device, 1, &_immFence, true, 9999999999));
 }
 
-void WakaEngine::destroy_image(const AllocatedImage& img)
+void ResiduaEngine::destroy_image(const AllocatedImage& img)
 {
     vkDestroyImageView(_device, img.imageView, nullptr);
     vmaDestroyImage(_allocator, img.image, img.allocation);
 }
 
-void WakaEngine::destroy_buffer(const AllocatedBuffer& buffer)
+void ResiduaEngine::destroy_buffer(const AllocatedBuffer& buffer)
 {
     vmaDestroyBuffer(_allocator, buffer.buffer, buffer.allocation);
 }
 
-void WakaEngine::init_vulkan()
+void ResiduaEngine::init_vulkan()
 {
     vkb::InstanceBuilder builder;
 
@@ -658,7 +601,7 @@ void WakaEngine::init_vulkan()
     vmaCreateAllocator(&allocatorInfo, &_allocator);
 }
 
-void WakaEngine::init_swapchain()
+void ResiduaEngine::init_swapchain()
 {
     create_swapchain(_windowExtent.width, _windowExtent.height);
 
@@ -693,35 +636,15 @@ void WakaEngine::init_swapchain()
 
 	VK_CHECK(vkCreateImageView(_device, &rview_info, nullptr, &_drawImage.imageView));
 
-    //create a depth image too
-	//hardcoding the draw format to 32 bit float
-	_depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
-    _depthImage.imageExtent = drawImageExtent;
-	VkImageUsageFlags depthImageUsages{};
-	depthImageUsages |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-
-	VkImageCreateInfo dimg_info = vkinit::image_create_info(_depthImage.imageFormat, depthImageUsages, drawImageExtent);
-
-	//allocate and create the image
-	vmaCreateImage(_allocator, &dimg_info, &rimg_allocinfo, &_depthImage.image, &_depthImage.allocation, nullptr);
-
-	//build a image-view for the draw image to use for rendering
-	VkImageViewCreateInfo dview_info = vkinit::imageview_create_info(_depthImage.imageFormat, _depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
-
-	VK_CHECK(vkCreateImageView(_device, &dview_info, nullptr, &_depthImage.imageView));
-
 	//add to deletion queues
 	_mainDeletionQueue.push_function([=]() {
 		vkDestroyImageView(_device, _drawImage.imageView, nullptr);
 		vmaDestroyImage(_allocator, _drawImage.image, _drawImage.allocation);
-
-		vkDestroyImageView(_device, _depthImage.imageView, nullptr);
-		vmaDestroyImage(_allocator, _depthImage.image, _depthImage.allocation);
 	});
 }
 
 
-void WakaEngine::create_swapchain(uint32_t width, uint32_t height)
+void ResiduaEngine::create_swapchain(uint32_t width, uint32_t height)
 {
 	vkb::SwapchainBuilder swapchainBuilder{ _chosenGPU,_device,_surface };
 
@@ -743,7 +666,7 @@ void WakaEngine::create_swapchain(uint32_t width, uint32_t height)
 	_swapchainImages = vkbSwapchain.get_images().value();
 	_swapchainImageViews = vkbSwapchain.get_image_views().value();
 }
-void WakaEngine::destroy_swapchain()
+void ResiduaEngine::destroy_swapchain()
 {
 	vkDestroySwapchainKHR(_device, _swapchain, nullptr);
 
@@ -754,7 +677,7 @@ void WakaEngine::destroy_swapchain()
 	}
 }
 
-void WakaEngine::resize_swapchain()
+void ResiduaEngine::resize_swapchain()
 {
 	vkDeviceWaitIdle(_device);
 
@@ -770,7 +693,7 @@ void WakaEngine::resize_swapchain()
 	resize_requested = false;
 }
 
-void WakaEngine::init_commands()
+void ResiduaEngine::init_commands()
 {
     // create a command pool for commands submitted to the graphics queue.
     // we also want the pool to allow for resetting of individual command buffers
@@ -798,7 +721,7 @@ void WakaEngine::init_commands()
     _mainDeletionQueue.push_function([=]() { vkDestroyCommandPool(_device, _immCommandPool, nullptr); });
 }
 
-void WakaEngine::init_sync_structures()
+void ResiduaEngine::init_sync_structures()
 {
     // create syncronization structures
     // one fence to control when the gpu has finished rendering the frame,
@@ -827,7 +750,7 @@ void WakaEngine::init_sync_structures()
     }
 }
 
-void WakaEngine::init_imgui()
+void ResiduaEngine::init_imgui()
 {
     // 1: create descriptor pool for IMGUI
     //  the size of the pool is very oversize, but it's copied from imgui demo
@@ -892,7 +815,7 @@ void WakaEngine::init_imgui()
 		});
 }
 
-void WakaEngine::init_descriptors()
+void ResiduaEngine::init_descriptors()
 {
     // TODO
         // create a descriptor pool
@@ -911,27 +834,9 @@ void WakaEngine::init_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         _drawImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
     }
-    {
-        DescriptorLayoutBuilder builder;
-        builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-
-
-        VkDescriptorSetLayoutBindingFlagsCreateInfo bindFlags = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .pNext = nullptr };
-
-        std::array<VkDescriptorBindingFlags, 2> flagArray{ 0,VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT };
-
-        builder.bindings[1].descriptorCount = 4048;
-
-        bindFlags.bindingCount = 2;
-        bindFlags.pBindingFlags = flagArray.data();
-
-        _gpuSceneDataDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, &bindFlags);
-    }
 
     _mainDeletionQueue.push_function([&]() {
         vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _gpuSceneDataDescriptorLayout, nullptr);
         });
 
     _drawImageDescriptors = globalDescriptorAllocator.allocate(_device, _drawImageDescriptorLayout);
@@ -974,54 +879,7 @@ TextureID TextureCache::AddTexture(const VkImageView& image, VkSampler sampler)
 	return TextureID{ idx };
 }
 
-void WakaEngine::set_window(SDL_Window* window, VkExtent2D& extent){
+void ResiduaEngine::set_window(SDL_Window* window, VkExtent2D& extent){
     _window = window;
     _windowExtent = extent;
-}
-
-GPUMeshBuffers WakaEngine::uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices)
-{
-    const size_t vertexBufferSize = vertices.size() * sizeof(Vertex);
-    const size_t indexBufferSize = indices.size() * sizeof(uint32_t);
-
-    GPUMeshBuffers newSurface;
-
-    newSurface.vertexBuffer = create_buffer(vertexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-
-
-    VkBufferDeviceAddressInfo deviceAdressInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,.buffer = newSurface.vertexBuffer.buffer };
-    newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInfo);
-
-    newSurface.indexBuffer = create_buffer(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-
-    AllocatedBuffer staging = create_buffer(vertexBufferSize + indexBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-
-    void* data = staging.allocation->GetMappedData();
-
-    // copy vertex buffer
-    memcpy(data, vertices.data(), vertexBufferSize);
-    // copy index buffer
-    memcpy((char*)data + vertexBufferSize, indices.data(), indexBufferSize);
-
-    immediate_submit([&](VkCommandBuffer cmd) {
-        VkBufferCopy vertexCopy{ 0 };
-        vertexCopy.dstOffset = 0;
-        vertexCopy.srcOffset = 0;
-        vertexCopy.size = vertexBufferSize;
-
-        vkCmdCopyBuffer(cmd, staging.buffer, newSurface.vertexBuffer.buffer, 1, &vertexCopy);
-
-        VkBufferCopy indexCopy{ 0 };
-        indexCopy.dstOffset = 0;
-        indexCopy.srcOffset = vertexBufferSize;
-        indexCopy.size = indexBufferSize;
-
-        vkCmdCopyBuffer(cmd, staging.buffer, newSurface.indexBuffer.buffer, 1, &indexCopy);
-        });
-
-    destroy_buffer(staging);
-
-    return newSurface;
 }

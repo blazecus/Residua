@@ -5,17 +5,17 @@ void Client::init() {
 }
 
 void Client::processSDLEvent(SDL_Event& e) {
-    input_manager.processSDLEvent(e);
+    inputManager.processSDLEvent(e);
 }
 
 void Client::update() {
-    InputManager::Inputs inputs = input_manager.getInputs();
+    InputManager::Inputs inputs = inputManager.getInputs();
 }
 
 void Client::resetInput() {
-    input_manager.resetInput();
+    inputManager.resetInput();
 }
 
 void Client::resetMouse(SDL_Window* window) {
-    input_manager.resetMouse(window);
+    inputManager.resetMouse(window);
 }

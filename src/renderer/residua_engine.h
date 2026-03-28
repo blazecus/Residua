@@ -87,7 +87,7 @@ struct TextureCache {
     TextureID AddTexture(const VkImageView& image, VkSampler sampler);
 };
 
-class WakaEngine {
+class ResiduaEngine {
 public:
     bool _isInitialized { false };
     int _frameNumber { 0 };
@@ -131,7 +131,6 @@ public:
 
     // draw resources
     AllocatedImage _drawImage;
-    AllocatedImage _depthImage;
 
     // immediate submit structures
     VkFence _immFence;
@@ -149,14 +148,12 @@ public:
     std::vector<ComputeEffect> backgroundEffects;
     int currentBackgroundEffect{ 0 };
 
-    GPUMeshBuffers rectangle;
-
     TextureCache texCache;
 
     EngineStats stats;
 
     // singleton style getter.multiple engines is not supported
-    static WakaEngine& Get();
+    static ResiduaEngine& Get();
 
     // initializes everything in the engine
     void init(
@@ -172,8 +169,6 @@ public:
     void draw_main(VkCommandBuffer cmd);
     void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 
-    void draw_geometry(VkCommandBuffer cmd);
-
     void update_scene();
 
     FrameData& get_current_frame();
@@ -183,10 +178,6 @@ public:
 
     AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
     AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
-
-    // upload a mesh into a pair of gpu buffers. If descriptor allocator is not
-    // null, it will also create a descriptor that points to the vertex buffer
-    GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
 
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
