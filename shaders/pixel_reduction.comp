@@ -1,0 +1,61 @@
+// PIXEL REDUCTION
+// takes input physics buffer and maps it to a physics buffer 4x smaller in each dimension
+// used to aggregate physics per pixel
+
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "physics_types.glsl"
+
+layout(constant_id = 0) const uint BODY_W = 4u;
+layout(constant_id = 1) const uint BODY_H = 4u;
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+
+layout(set = 0, binding = 0) readonly  buffer SrcBuffer { PhysicsPixel src[]; };
+layout(set = 0, binding = 1) writeonly buffer DstBuffer { PhysicsPixel dst[]; };
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+
+layout(push_constant) uniform PushConstants {
+    uint src_width;
+    uint src_height;
+};
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+    uvec2 src_coord = gl_GlobalInvocationID.xy;
+
+    float fx = 0.0, fy = 0.0, fm = 0.0, mass = 0.0, inertia = 0.0;
+
+    if (src_coord.x < src_width && src_coord.y < src_height) {
+        PhysicsPixel s = src[src_coord.y * src_width + src_coord.x];
+        fx      = s.total_force.x;
+        fy      = s.total_force.y;
+        fm      = s.force_moment;
+        mass    = s.total_mass;
+        inertia = s.inertia_moment;
+    }
+
+    fx      = subgroupAdd(fx);
+    fy      = subgroupAdd(fy);
+    fm      = subgroupAdd(fm);
+    mass    = subgroupAdd(mass);
+    inertia = subgroupAdd(inertia);
+
+    if (gl_SubgroupInvocationID == 0u) {
+        uint dst_width = src_width / BODY_W;
+        uint dst_idx   = gl_WorkGroupID.y * dst_width + gl_WorkGroupID.x;
+
+        PhysicsPixel d;
+        d.total_force    = vec2(fx, fy);
+        d.force_moment   = fm;
+        d.total_mass     = mass;
+        d.inertia_moment = inertia;
+        d._pad           = 0.0;
+
+        dst[dst_idx] = d;
+    }
+}

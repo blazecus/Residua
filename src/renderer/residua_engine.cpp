@@ -49,6 +49,10 @@ void ResiduaEngine::init(
 
     init_imgui();
 
+    physics.init(this, 10);
+    LoadedBodyImage ball = load_body_image("C:/Users/Jack/Documents/Residua/assets/physics/ball.png");
+    physics.add_body(this, ball, glm::vec2(70, 100));
+
     // everything went fine
     _isInitialized = true;
 }

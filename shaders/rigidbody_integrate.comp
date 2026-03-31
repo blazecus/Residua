@@ -1,0 +1,89 @@
+// rigidbody_integrate.comp
+//
+// Symplectic Euler integrator. One thread per rigid body.
+// Reads the aggregated PhysicsPixel for this body, integrates velocity and
+// position, and writes the updated RigidBody.
+//
+// Run once per body size after its reduction pass is complete.
+// The src_physics buffer is the final reduced PhysicsPixel buffer for this level
+// (body_l0 for 4×4 bodies, body_l1 for 16×16, body_l2 for 64×64).
+//
+// Dispatch:
+//   vkCmdDispatch(ceil(body_count / 64), 1, 1)
+
+#version 460
+#include "physics_types.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Body pixel dimensions — must match the reduction pass that produced src_physics.
+layout(constant_id = 0) const uint BODY_W = 4u;
+layout(constant_id = 1) const uint BODY_H = 4u;
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+
+layout(set = 0, binding = 0) readonly buffer RigidBodySrc {
+    RigidBody bodies_src[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer RigidBodyDst {
+    RigidBody bodies_dst[];
+};
+
+// Final reduced PhysicsPixel buffer for this body size.
+// Indexed by body position in the reduced grid:
+//   body_idx = body_y * (image_width / BODY_W) + body_x
+layout(set = 0, binding = 2) readonly buffer PhysicsBuffer {
+    PhysicsPixel physics[];
+};
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+
+layout(push_constant) uniform PushConstants {
+    uint  body_count;
+    float dt;           // timestep in seconds
+};
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= body_count) return;
+
+    RigidBody body   = bodies_src[idx];
+    PhysicsPixel agg = physics[idx];
+
+    // ── Mass and moment of inertia ────────────────────────────────────────────
+    float mass = agg.total_mass;
+
+    // Parallel axis theorem: I_com = I_origin - mass × |CoM|²
+    // inertia_moment = Σ(mass_i × |pos_i|²) was accumulated about the world origin.
+    // body.position is the CoM.
+    float I = agg.inertia_moment - mass * dot(body.position, body.position);
+
+    // ── Torque correction ─────────────────────────────────────────────────────
+    // agg.force_moment = Σ(pos × F) about world origin.
+    // Torque about CoM (body.position) = force_moment - (CoM × total_force).
+    float torque = agg.force_moment
+                 - (body.position.x * agg.total_force.y
+                 -  body.position.y * agg.total_force.x);
+
+    // ── Integrate ─────────────────────────────────────────────────────────────
+    // Symplectic Euler: update velocity first, then use new velocity for position.
+    vec2  new_velocity         = body.velocity         + (agg.total_force / mass) * dt;
+    float new_angular_velocity = body.angular_velocity + (torque / I) * dt;
+
+    vec2  new_position = body.position + new_velocity         * dt;
+    float new_rotation = body.rotation + new_angular_velocity * dt;
+
+    // ── Write output ──────────────────────────────────────────────────────────
+    RigidBody out_body;
+    out_body.position         = new_position;
+    out_body.rotation         = new_rotation;
+    out_body.density          = body.density;
+    out_body.velocity         = new_velocity;
+    out_body.angular_velocity = new_angular_velocity;
+    out_body.pixel_index      = body.pixel_index;
+
+    bodies_dst[idx] = out_body;
+}

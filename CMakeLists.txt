@@ -34,6 +34,8 @@ add_executable (Residua
   src/renderer/vk_descriptors.h
   src/renderer/vk_pipelines.cpp
   src/renderer/vk_pipelines.h
+  src/physics/physics_pipeline.cpp
+  src/physics/physics_pipeline.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
@@ -58,16 +60,20 @@ file(GLOB_RECURSE GLSL_SOURCE_FILES
     "${PROJECT_SOURCE_DIR}/shaders/*.comp"
     )
 
+file(GLOB_RECURSE GLSL_HEADER_FILES
+    "${PROJECT_SOURCE_DIR}/shaders/*.glsl"
+    )
+
 foreach(GLSL ${GLSL_SOURCE_FILES})
   message(STATUS "BUILDING SHADER")
   get_filename_component(FILE_NAME ${GLSL} NAME)
   set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${FILE_NAME}.spv")
   message(STATUS ${GLSL})
-  message(STATUS COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV})
+  message(STATUS COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV})
   add_custom_command(
     OUTPUT ${SPIRV}
-    COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
-    DEPENDS ${GLSL})
+    COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV}
+    DEPENDS ${GLSL} ${GLSL_HEADER_FILES})
   list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
