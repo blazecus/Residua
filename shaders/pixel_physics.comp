@@ -1,8 +1,10 @@
 // pixel_physics.comp
 //
-// Evaluates physics per pixel in rigidbodies
+// Evaluates physics per pixel in rigidbodies.
+// Writes per-pixel force contributions and contact data for reduction.
 
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #include "physics_types.glsl"
 
 layout(constant_id = 0) const uint BODY_W = 4u;
@@ -20,20 +22,41 @@ layout(set = 0, binding = 1) buffer PhysicsPixelBuffer {
     PhysicsPixel pixels[];
 };
 
-layout(r8ui, set = 0, binding = 2) uniform readonly uimage2D collision_layer;
+layout(set = 0, binding = 2) readonly buffer CollisionBuffer {
+    CollisionPixel collision_pixels[];
+};
+
+layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
+    uint active_indices[];
+};
 
 // ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
     uint  body_count;
-    float gravity; 
+    float gravity;
+    uint  physics_width;
+    uint  physics_height;
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+uint sample_collision(ivec2 coord) {
+    if (coord.x < 0 || coord.y < 0 ||
+        coord.x >= int(physics_width) || coord.y >= int(physics_height))
+        return COLLISION_EMPTY;
+    return collision_pixels[coord.y * int(physics_width) + coord.x].body_id;
+}
+
+bool is_solid(uint body_id, uint self_id) {
+    return body_id != COLLISION_EMPTY && body_id != self_id;
+}
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 void main() {
-    uint body_idx = gl_WorkGroupID.x;
-    if (body_idx >= body_count) return;
+    if (gl_WorkGroupID.x >= body_count) return;
+    uint body_idx = active_indices[gl_WorkGroupID.x];
 
     RigidBody body = bodies[body_idx];
 
@@ -46,18 +69,39 @@ void main() {
         s * local_pos.x + c * local_pos.y
     );
 
-    uint out_idx = body.pixel_index + gl_LocalInvocationID.y * BODY_W + gl_LocalInvocationID.x;
-    float mass = pixels[out_idx].total_mass; // set on CPU from image alpha
+    uint  out_idx = body.pixel_index + gl_LocalInvocationID.y * BODY_W + gl_LocalInvocationID.x;
+    float mass    = pixels[out_idx].total_mass; // set on CPU from image alpha
 
-    ivec2 sample_coord = ivec2(floor(world_pos));
-    bool in_collision = imageLoad(collision_layer, sample_coord).r > 0u;
+    ivec2 coord    = ivec2(floor(world_pos));
+    uint  self_id  = body_idx + 1u;
+    bool  in_collision = is_solid(sample_collision(coord), self_id);
 
-    vec2 force = vec2(0.0);
-    if (!in_collision) {
-        force = vec2(0.0, mass * gravity);
+    // gravity
+    vec2 force = vec2(0.0, mass * gravity);
+
+    vec2  contact_normal   = vec2(0.0);
+    vec2  contact_centroid = vec2(0.0);
+    float contact_mass     = 0.0;
+
+    if (in_collision) {
+        float sl = float(is_solid(sample_collision(coord + ivec2(-1,  0)), self_id));
+        float sr = float(is_solid(sample_collision(coord + ivec2( 1,  0)), self_id));
+        float su = float(is_solid(sample_collision(coord + ivec2( 0, -1)), self_id));
+        float sd = float(is_solid(sample_collision(coord + ivec2( 0,  1)), self_id));
+
+        vec2 grad = vec2(sl - sr, su - sd);
+        float glen = length(grad);
+        vec2 n = (glen > 0.001) ? grad / glen : vec2(0.0, -1.0);
+
+        contact_normal   = mass * n;
+        contact_centroid = mass * world_pos;
+        contact_mass     = mass;
     }
 
-    pixels[out_idx].total_force    = force;
-    pixels[out_idx].force_moment   = world_pos.x * force.y - world_pos.y * force.x;
-    pixels[out_idx].inertia_moment = mass * dot(world_pos, world_pos);
+    pixels[out_idx].total_force     = force;
+    pixels[out_idx].force_moment    = world_pos.x * force.y - world_pos.y * force.x;
+    pixels[out_idx].inertia_moment  = mass * dot(world_pos, world_pos);
+    pixels[out_idx].collision_count = contact_mass;
+    pixels[out_idx].contact_normal  = contact_normal;
+    pixels[out_idx].contact_centroid= contact_centroid;
 }

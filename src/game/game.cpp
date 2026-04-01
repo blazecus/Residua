@@ -5,7 +5,7 @@ void Game::SDL_setup() {
 
 	SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 
-	_window = SDL_CreateWindow("Graviator", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, _windowExtent.width,
+	_window = SDL_CreateWindow("Residua", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, _windowExtent.width,
 		_windowExtent.height, window_flags);
 
 	int32_t cursorData[2] = {0, 0};
@@ -19,6 +19,12 @@ void Game::init() {
 	client.init();
 
 	engine.init(_windowExtent, _window);
+
+	ball_image = load_body_image("../assets/physics/ball.png");
+
+	physics.init(&engine, 256);
+	physics.upload_collision_layer(&engine, "../assets/physics/collision_layer.png");
+	engine.physics = &physics;
 
 	lastFrame = std::chrono::system_clock::now();
 }
@@ -57,15 +63,41 @@ void Game::run() {
 			input.flou(InputManager::InputType::RIGHT) - input.flou(InputManager::InputType::LEFT),
 			input.flou(InputManager::InputType::BACKWARD) - input.flou(InputManager::InputType::FORWARD)
 		) * 200.0f * delta;
-		std::cout << diff.x << " " << diff.y << std::endl;
 		temp_player_position += diff;
 		engine.process_player_update(temp_player_position);
 
 
 		client.update();
 
-		if (!freeze_rendering)
+		if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 20) {
+			int mx, my;
+			SDL_GetMouseState(&mx, &my);
+			glm::vec2 spawn_pos = {
+				mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
+				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+			};
+			physics.add_body(&engine, ball_image, spawn_pos);
+			lastSpawn = 0;
+		}
+		if (input.blou(InputManager::InputType::INSPECT)) {
+			int mx, my;
+			SDL_GetMouseState(&mx, &my);
+			glm::vec2 check_pos = {
+				mx * float(PHYSICS_WIDTH) / float(_windowExtent.width),
+				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+			};
+
+			if (auto slot = physics.body_at(check_pos)) {
+				physics.remove_body(*slot);
+			}
+		}
+
+		lastSpawn++;
+
+		if (!freeze_rendering) {
+			engine._dt = delta;
 			engine.draw_frame();
+		}
 			
 		std::chrono::microseconds elapsed{ 0 };
 		auto end = std::chrono::system_clock::now();

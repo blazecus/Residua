@@ -187,6 +187,9 @@ public:
     void destroy_buffer(const AllocatedBuffer& buffer);
 
     bool resize_requested { false };
+
+    PhysicsPipeline* physics { nullptr };
+    float _dt { 0.016f };
     bool freeze_rendering { false };
 
     void set_window(SDL_Window* window, VkExtent2D& extent);
@@ -197,8 +200,6 @@ public:
 
     void draw_frame();
     //void add_render_object()
-
-    PhysicsPipeline physics;
 
 private:
     void init_vulkan();

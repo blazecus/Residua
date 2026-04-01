@@ -72,12 +72,14 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
   message(STATUS COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV})
   add_custom_command(
     OUTPUT ${SPIRV}
-    COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV}
+    COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.3 ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV}
     DEPENDS ${GLSL} ${GLSL_HEADER_FILES})
   list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
 add_custom_target(
-    Shaders 
+    Shaders
     DEPENDS ${SPIRV_BINARY_FILES}
     )
+
+add_dependencies(Residua Shaders)

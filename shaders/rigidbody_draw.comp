@@ -4,6 +4,7 @@
 // might want to consider the benefits of using a workgroup per body instead of traversing the entire image and retrieving body index from pixel index 
 
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #include "physics_types.glsl"
 
 layout(constant_id = 0) const uint BODY_W = 4u;
@@ -21,19 +22,32 @@ layout(set = 0, binding = 1) readonly buffer PixelColorBuffer {
     vec4 pixel_colors[];
 };
 
-layout(rgba16f, set = 0, binding = 2) uniform image2D output_image;
+layout(set = 0, binding = 2) readonly buffer PhysicsPixelBuffer {
+    PhysicsPixel physics_pixels[];
+};
+
+layout(rgba16f, set = 0, binding = 3) uniform image2D output_image;
+
+layout(set = 0, binding = 4) buffer CollisionBuffer {
+    CollisionPixel collision_pixels[];
+};
+
+layout(set = 0, binding = 5) readonly buffer ActiveIndicesBuffer {
+    uint active_indices[];
+};
 
 // ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
     uint body_count;
+    uint physics_width;
 };
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 void main() {
-    uint body_idx = gl_WorkGroupID.x;
-    if (body_idx >= body_count) return;
+    if (gl_WorkGroupID.x >= body_count) return;
+    uint body_idx = active_indices[gl_WorkGroupID.x];
 
     RigidBody body = bodies[body_idx];
 
@@ -52,7 +66,23 @@ void main() {
         out_coord.x >= image_size.x || out_coord.y >= image_size.y) return;
 
     uint local_idx = gl_LocalInvocationID.y * BODY_W + gl_LocalInvocationID.x;
-    vec4 color = pixel_colors[body.pixel_index + local_idx];
+    uint phys_idx  = body.pixel_index + local_idx;
 
-    imageStore(output_image, out_coord, color);
+    if (physics_pixels[phys_idx].total_mass <= 0.0) return;
+
+    vec4 color = pixel_colors[phys_idx];
+
+    if (color.a > 0.0) {
+        imageStore(output_image, out_coord, color);
+
+        vec2 r = world_pos - body.position;
+        vec2 vel_at_pixel = body.velocity + body.angular_velocity * vec2(-r.y, r.x);
+
+        uint flat_idx = uint(out_coord.y) * physics_width + uint(out_coord.x);
+        if (collision_pixels[flat_idx].body_id != COLLISION_STATIC) {
+            collision_pixels[flat_idx].body_id = body_idx + 1u;
+            collision_pixels[flat_idx].vel_x   = vel_at_pixel.x;
+            collision_pixels[flat_idx].vel_y   = vel_at_pixel.y;
+        }
+    }
 }

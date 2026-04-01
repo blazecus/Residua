@@ -1,0 +1,80 @@
+// gap_fill.comp
+//
+// Fills holes left by the forward-mapped rigid body draw pass.
+// For each empty pixel (alpha == 0) with at least 2 colored neighbors,
+// writes the averaged color to output_image and propagates collision data
+// from the most common neighboring body into collision_pixels.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "physics_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D output_image;
+
+layout(set = 0, binding = 1) buffer CollisionBuffer {
+    CollisionPixel collision_pixels[];
+};
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(width) || coord.y >= int(height)) return;
+
+    if (imageLoad(output_image, coord).a > 0.0) return; // already filled
+
+    vec4  color_sum  = vec4(0.0);
+    float color_count = 0.0;
+
+    // Pick collision data from the first solid neighbor found
+    uint  fill_body_id = COLLISION_EMPTY;
+    float fill_vel_x   = 0.0;
+    float fill_vel_y   = 0.0;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 nc = coord + ivec2(dx, dy);
+            if (nc.x < 0 || nc.y < 0 ||
+                nc.x >= int(width) || nc.y >= int(height)) continue;
+
+            vec4 nb = imageLoad(output_image, nc);
+            if (nb.a > 0.0) {
+                color_sum   += nb;
+                color_count += 1.0;
+
+                if (fill_body_id == COLLISION_EMPTY) {
+                    uint nb_idx = uint(nc.y) * width + uint(nc.x);
+                    CollisionPixel cp = collision_pixels[nb_idx];
+                    if (cp.body_id != COLLISION_EMPTY && cp.body_id != COLLISION_STATIC) {
+                        fill_body_id = cp.body_id;
+                        fill_vel_x   = cp.vel_x;
+                        fill_vel_y   = cp.vel_y;
+                    }
+                }
+            }
+        }
+    }
+
+    if (color_count >= 2.0) {
+        imageStore(output_image, coord, color_sum / color_count);
+
+        if (fill_body_id != COLLISION_EMPTY) {
+            uint dst_idx = uint(coord.y) * width + uint(coord.x);
+            collision_pixels[dst_idx].body_id = fill_body_id;
+            collision_pixels[dst_idx].vel_x   = fill_vel_x;
+            collision_pixels[dst_idx].vel_y   = fill_vel_y;
+        }
+    }
+}

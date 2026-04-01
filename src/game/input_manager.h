@@ -14,7 +14,7 @@ public:
 
 	enum InputType {
 		FORWARD, BACKWARD, LEFT, RIGHT,
-		SELECT, JUMP, CROUCH, BACK,
+		SELECT, INSPECT, JUMP, CROUCH, BACK,
 		CAMERA_MOTION,
 		NO_BINDING,
 		INPUT_TYPE_COUNT
@@ -52,6 +52,7 @@ public:
 			{LEFT,     Output{}},
 			{RIGHT,    Output{}},
 			{SELECT,   Output{}},
+			{INSPECT,  Output{}},
 			{JUMP,     Output{}},
 			{CROUCH,   Output{}},
 			{BACK,     Output{}}
@@ -91,7 +92,8 @@ public:
 			{SDLK_BACKSPACE, BACK}
 		};
 		settings.keyboardMap.mouseBindings = {
-			{SDL_BUTTON_LEFT, SELECT}
+			{SDL_BUTTON_LEFT, SELECT},
+			{SDL_BUTTON_RIGHT, INSPECT}
 		};
 	}
 

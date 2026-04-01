@@ -2,6 +2,7 @@
 
 #include <src/game/client.h>
 #include <src/renderer/residua_engine.h>
+#include <src/physics/physics_pipeline.h>
 #include <chrono>
 
 class Game{
@@ -13,6 +14,7 @@ public:
 	SDL_Cursor *cursor; 
 
 	ResiduaEngine engine;
+	PhysicsPipeline physics;
 
 	bool freeze_rendering{ false };
 	bool fpsLimit = true;
@@ -25,8 +27,12 @@ public:
 	std::chrono::microseconds frameTime{ 1000000 / fps};
 	std::chrono::system_clock::time_point lastFrame;
 
+	uint32_t lastSpawn = 0;
+
 	Client client;
-	
+
+	LoadedBodyImage ball_image;
+
 	void SDL_setup();
 
 	void init();

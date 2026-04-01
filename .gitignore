@@ -2,3 +2,4 @@
 /bin
 /assets
 /.vs
+/shaders/*.spv

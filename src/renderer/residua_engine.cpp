@@ -13,7 +13,7 @@
 #include "vk_mem_alloc.h"
 #include <array>
 
-constexpr bool bUseValidationLayers = false;
+constexpr bool bUseValidationLayers = true;
 
 ResiduaEngine* loadedEngine = nullptr;
 
@@ -48,10 +48,6 @@ void ResiduaEngine::init(
     init_default_data();
 
     init_imgui();
-
-    physics.init(this, 10);
-    LoadedBodyImage ball = load_body_image("C:/Users/Jack/Documents/Residua/assets/physics/ball.png");
-    physics.add_body(this, ball, glm::vec2(70, 100));
 
     // everything went fine
     _isInitialized = true;
@@ -129,6 +125,11 @@ void ResiduaEngine::cleanup()
 
 void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 {
+	if (physics) {
+		physics->dispatch(cmd, _dt);
+		return;
+	}
+
 	ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
 	// bind the background compute pipeline
@@ -145,7 +146,7 @@ void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 
 void ResiduaEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 {
-	VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(targetImageView, nullptr, VK_IMAGE_LAYOUT_GENERAL);
+	VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(targetImageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	VkRenderingInfo renderInfo = vkinit::rendering_info(_windowExtent, &colorAttachment, nullptr);
 
 	vkCmdBeginRendering(cmd, &renderInfo);
@@ -191,16 +192,17 @@ void ResiduaEngine::draw()
 
 	draw_main(cmd);
 
-	//transtion the draw image and the swapchain image into their correct transfer layouts
-	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	VkExtent2D extent;
-	extent.height = _windowExtent.height;
-	extent.width = _windowExtent.width;
-
-	// execute a copy from the draw image into the swapchain
-	vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent,_swapchainExtent);
+	if (physics) {
+		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		vkutil::copy_image_to_image(cmd, physics->output_screen.image, _swapchainImages[swapchainImageIndex],
+			{ PHYSICS_WIDTH, PHYSICS_HEIGHT }, _swapchainExtent);
+		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	} else {
+		vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
+	}
 
 	// set swapchain image layout to Attachment Optimal so we can draw it
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -547,7 +549,7 @@ void ResiduaEngine::init_vulkan()
     vkb::InstanceBuilder builder;
 
     // make the vulkan instance, with basic debug features
-    auto inst_ret = builder.set_app_name("Graviator")
+    auto inst_ret = builder.set_app_name("Residua")
                         .request_validation_layers(bUseValidationLayers)
                         .use_default_debug_messenger()
                         .require_api_version(1, 3, 0)
@@ -564,6 +566,7 @@ void ResiduaEngine::init_vulkan()
     VkPhysicalDeviceVulkan13Features features13 {};
 	features13.dynamicRendering = true;
 	features13.synchronization2 = true;
+	features13.maintenance4 = true;
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
    
    VkPhysicalDeviceVulkan12Features features12 {};
