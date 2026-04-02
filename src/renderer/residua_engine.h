@@ -17,7 +17,7 @@
 #include "vk_descriptors.h"
 #include "vk_pipelines.h"
 
-#include "../physics/physics_pipeline.h"
+#include "../physics/physics_engine.h"
 
 #include <vk_mem_alloc.h>
 #include <chrono>

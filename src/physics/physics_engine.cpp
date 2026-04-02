@@ -1,4 +1,4 @@
-#include "physics_pipeline.h"
+#include "physics_engine.h"
 #include "../renderer/residua_engine.h"
 #include "../renderer/vk_images.h"
 #include "../renderer/vk_pipelines.h"
@@ -670,7 +670,7 @@ void PhysicsPipeline::dispatch(VkCommandBuffer cmd, float dt) {
 
     // 5. rigidbody_integrate
     {
-        struct { uint32_t body_count; float dt; float restitution; } pc { active_count, dt, 0.3f };
+        struct { uint32_t body_count; float dt; float restitution; } pc { active_count, dt, 0.5f };
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, integrate_pl.pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
             integrate_pl.layout, 0, 1, &integrate_desc[p], 0, nullptr);

@@ -37,44 +37,66 @@ void main() {
     vec4  color_sum  = vec4(0.0);
     float color_count = 0.0;
 
-    // Pick collision data from the first solid neighbor found
-    uint  fill_body_id = COLLISION_EMPTY;
-    float fill_vel_x   = 0.0;
-    float fill_vel_y   = 0.0;
+    uint  fill_body_id   = COLLISION_EMPTY;
+    float fill_vel_x     = 0.0;
+    float fill_vel_y     = 0.0;
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            ivec2 nc = coord + ivec2(dx, dy);
-            if (nc.x < 0 || nc.y < 0 ||
-                nc.x >= int(width) || nc.y >= int(height)) continue;
+    ivec2 cardinals[] = {ivec2(-1,0), ivec2(1,0), ivec2(0, -1), ivec2(0,1)};
 
-            vec4 nb = imageLoad(output_image, nc);
-            if (nb.a > 0.0) {
-                color_sum   += nb;
-                color_count += 1.0;
+    CollisionPixel first_type;
+    CollisionPixel second_type;
 
-                if (fill_body_id == COLLISION_EMPTY) {
-                    uint nb_idx = uint(nc.y) * width + uint(nc.x);
-                    CollisionPixel cp = collision_pixels[nb_idx];
-                    if (cp.body_id != COLLISION_EMPTY && cp.body_id != COLLISION_STATIC) {
-                        fill_body_id = cp.body_id;
-                        fill_vel_x   = cp.vel_x;
-                        fill_vel_y   = cp.vel_y;
-                    }
-                }
+    uint first_count = 0;
+    uint second_count = 0;
+    for(uint i = 0; i < 4; i++){
+        ivec2 card = cardinals[i];
+        ivec2 nc = coord + card;
+        if (nc.x < 0 || nc.y < 0 ||
+            nc.x >= int(width) || nc.y >= int(height)) continue;
+
+        vec4 nb = imageLoad(output_image, nc);
+        if (nb.a > 0.0) {
+            color_sum   += nb;
+            color_count += 1.0;
+
+            uint nb_idx = uint(nc.y) * width + uint(nc.x);
+            CollisionPixel collision = collision_pixels[nb_idx];
+
+            if(first_count == 0){
+                first_type = collision;
+            }
+            else if(second_count == 0){
+                second_type = collision;
+            }
+
+            if(collision.body_id == first_type.body_id){
+                first_count++;
+            }
+            else if(collision.body_id == second_type.body_id){
+                second_count++;
+            }
+            else{
+                return;
             }
         }
     }
 
-    if (color_count >= 2.0) {
-        imageStore(output_image, coord, color_sum / color_count);
+    CollisionPixel result;
+    if(first_count >= 3 && first_type.body_id != COLLISION_EMPTY && first_type.body_id != COLLISION_STATIC){
+        result = first_type;
+    }
+    else if(second_count >= 3 && second_type.body_id != COLLISION_EMPTY && second_type.body_id != COLLISION_STATIC){
+        result = second_type;
+    }
+    else{
+        return;
+    }
+    imageStore(output_image, coord, color_sum / color_count);
 
-        if (fill_body_id != COLLISION_EMPTY) {
-            uint dst_idx = uint(coord.y) * width + uint(coord.x);
-            collision_pixels[dst_idx].body_id = fill_body_id;
-            collision_pixels[dst_idx].vel_x   = fill_vel_x;
-            collision_pixels[dst_idx].vel_y   = fill_vel_y;
-        }
+    if (fill_body_id != COLLISION_EMPTY) {
+        uint dst_idx = uint(coord.y) * width + uint(coord.x);
+        collision_pixels[dst_idx].body_id = fill_body_id;
+        collision_pixels[dst_idx].vel_x   = fill_vel_x;
+        collision_pixels[dst_idx].vel_y   = fill_vel_y;
     }
 }

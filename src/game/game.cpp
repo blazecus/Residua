@@ -69,7 +69,7 @@ void Game::run() {
 
 		client.update();
 
-		if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 20) {
+		if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 2) {
 			int mx, my;
 			SDL_GetMouseState(&mx, &my);
 			glm::vec2 spawn_pos = {

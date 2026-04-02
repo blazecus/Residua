@@ -2,7 +2,7 @@
 
 #include <src/game/client.h>
 #include <src/renderer/residua_engine.h>
-#include <src/physics/physics_pipeline.h>
+#include <src/physics/physics_engine.h>
 #include <chrono>
 
 class Game{

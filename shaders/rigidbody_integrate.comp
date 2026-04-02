@@ -1,6 +1,6 @@
 // rigidbody_integrate.comp
 //
-// Symplectic Euler integrator with impulse-based collision response.
+// Symplectic Euler integrator with constraint-based collision response.
 // One thread per rigid body.
 
 #version 460
@@ -35,10 +35,8 @@ layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
 layout(push_constant) uniform PushConstants {
     uint  body_count;
     float dt;
-    float restitution;   
+    float restitution;
 };
-
-const float SEPARATION_SPEED = 8.0;
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -71,32 +69,53 @@ void main() {
         if (nlen > 0.001) {
             vec2 n = agg.contact_normal / nlen;
 
-            vec2 contact_pos = agg.contact_centroid / agg.collision_count;
-            vec2 r           = contact_pos - body.position;
+            float force_n = dot(agg.total_force / mass * dt, n);
+            if (force_n < 0.0) new_velocity -= force_n * n;
 
-            vec2 v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
-            float v_n      = dot(v_contact, n);
+            vec2  contact_pos = agg.contact_centroid / agg.collision_count;
+            vec2  r           = contact_pos - body.position;
+            float r_cross_n   = r.x * n.y - r.y * n.x;
+            float denom       = 1.0 / mass + (r_cross_n * r_cross_n) / I;
 
-            float penetration = clamp(agg.collision_count / mass, 0.0, 1.0);
+            vec2  v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
+            float v_n       = dot(v_contact, n);
 
-            float v_target = penetration * SEPARATION_SPEED;
-
-            if (v_n < v_target) {
-                float r_cross_n = r.x * n.y - r.y * n.x;
-                float denom     = 1.0 / mass + (r_cross_n * r_cross_n) / I;
-
-                const float VELOCITY_THRESHOLD = 2.0;
-                float e = abs(v_n) > VELOCITY_THRESHOLD ? restitution : 0.0;
-
-                float J = -(1.0 + e) * v_n / denom;
-                J += v_target / denom;
+            if (v_n < 0.0) {
+                const float BOUNCE_THRESHOLD = 1.5;
+                float e = abs(v_n) > BOUNCE_THRESHOLD ? restitution : 0.0;
+                float J = (-e * v_n - v_n) / denom; // = -(1+e)*v_n / denom
 
                 new_velocity         += (J / mass) * n;
                 new_angular_velocity += (r_cross_n * J) / I;
+
+                // Coulomb friction — damps tangential (spinning) motion at contact
+                vec2  v_t     = v_contact - v_n * n;
+                float v_t_len = length(v_t);
+                if (v_t_len > 0.001) {
+                    vec2  t         = v_t / v_t_len;
+                    float r_cross_t = r.x * t.y - r.y * t.x;
+                    float denom_t   = 1.0 / mass + (r_cross_t * r_cross_t) / I;
+                    float J_t       = min(0.4 * J, v_t_len / denom_t);
+                    new_velocity         -= (J_t / mass) * t;
+                    new_angular_velocity -= (r_cross_t * J_t) / I;
+                }
             }
 
-            const float BAUMGARTE = 0.3;
-            baumgarte_correction = n * penetration * BAUMGARTE;
+            if(agg.collision_count > agg.total_mass * 0.8){
+                float pen = max(agg.collision_count, 0.0) / mass;
+                baumgarte_correction = n * pen * 0.15;
+            }
+        }
+    }
+
+    // TODO: better damping system (also need dt independent)
+    new_velocity         *= 0.995;
+    new_angular_velocity *= 0.97;
+
+    if (agg.collision_count > 0.0001) {
+        if (length(new_velocity) < 0.5 && abs(new_angular_velocity) < 0.2) {
+            new_velocity         = vec2(0.0);
+            new_angular_velocity = 0.0;
         }
     }
 

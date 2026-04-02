@@ -672,6 +672,7 @@ void ResiduaEngine::create_swapchain(uint32_t width, uint32_t height)
 	_swapchain = vkbSwapchain.swapchain;
 	_swapchainImages = vkbSwapchain.get_images().value();
 	_swapchainImageViews = vkbSwapchain.get_image_views().value();
+
 }
 void ResiduaEngine::destroy_swapchain()
 {
@@ -679,9 +680,9 @@ void ResiduaEngine::destroy_swapchain()
 
 	// destroy swapchain resources
 	for (int i = 0; i < _swapchainImageViews.size(); i++) {
-
 		vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
 	}
+
 }
 
 void ResiduaEngine::resize_swapchain()
