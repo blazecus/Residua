@@ -34,8 +34,8 @@ add_executable (Residua
   src/renderer/vk_descriptors.h
   src/renderer/vk_pipelines.cpp
   src/renderer/vk_pipelines.h
-  src/physics/physics_pipeline.cpp
-  src/physics/physics_pipeline.h
+  src/physics/physics_engine.cpp
+  src/physics/physics_engine.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
