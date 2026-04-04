@@ -1,0 +1,148 @@
+// contact_reduction.comp
+//
+// Groups ContactEntry records (written by pixel_physics.comp) by unique other-body ID
+// and reduces each group into one ContactAggregate for the integrator.
+//
+// Algorithm:
+//   1. Use atomicCompSwap on shared slot_id[] to discover up to MAX_CONTACTS unique IDs.
+//   2. For each occupied slot, run a standard parallel tree reduction over all entries
+//      matching that ID to produce one ContactAggregate.
+//
+// One workgroup per active body; 256 threads; internal loop over entries.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "physics_types.glsl"
+
+layout(constant_id = 0) const uint BODY_W = 4u;
+layout(constant_id = 1) const uint BODY_H = 4u;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+
+layout(set = 0, binding = 0) readonly buffer ContactEntryBuffer {
+    ContactEntry contact_entries[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ContactCounterBuffer {
+    uint contact_counters[];
+};
+
+layout(set = 0, binding = 2) buffer ContactAggBuffer {
+    ContactAggregate contact_agg[];
+};
+
+layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
+    uint active_indices[];
+};
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+
+layout(push_constant) uniform PushConstants {
+    uint body_count;
+};
+
+// ─── Shared memory ────────────────────────────────────────────────────────────
+
+shared uint  slot_id[MAX_CONTACTS];  // 0 = empty (COLLISION_EMPTY)
+
+shared float sh_w  [256];
+shared float sh_nx [256];
+shared float sh_ny [256];
+shared float sh_ccx[256];
+shared float sh_ccy[256];
+shared float sh_cvx[256];
+shared float sh_cvy[256];
+shared float sh_ci [256];
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+    if (gl_WorkGroupID.x >= body_count) return;
+    uint body_idx = active_indices[gl_WorkGroupID.x];
+    uint lid      = gl_LocalInvocationID.x;
+
+    const uint MAX_ENTRIES = BODY_W * BODY_H * 2u;
+    uint base        = body_idx * MAX_ENTRIES;
+    uint entry_count = min(contact_counters[body_idx], MAX_ENTRIES);
+
+    // ── Step 1: Clear output aggregates and slot table ─────────────────────────
+    if (lid < MAX_CONTACTS) {
+        slot_id[lid] = COLLISION_EMPTY;
+        uint agg_idx = body_idx * MAX_CONTACTS + lid;
+        contact_agg[agg_idx].other_id        = COLLISION_EMPTY;
+        contact_agg[agg_idx].collision_count = 0.0;
+        contact_agg[agg_idx].contact_normal  = vec2(0.0);
+        contact_agg[agg_idx].contact_centroid= vec2(0.0);
+        contact_agg[agg_idx].contact_vel     = vec2(0.0);
+        contact_agg[agg_idx].contact_inv_mass= 0.0;
+    }
+    barrier();
+
+    // ── Step 2: Discover unique other-body IDs via atomicCompSwap ─────────────
+    for (uint i = lid; i < entry_count; i += 256u) {
+        uint oid = contact_entries[base + i].other_id;
+        if (oid == COLLISION_EMPTY) continue;
+        for (uint s = 0u; s < MAX_CONTACTS; s++) {
+            uint prev = atomicCompSwap(slot_id[s], COLLISION_EMPTY, oid);
+            if (prev == COLLISION_EMPTY || prev == oid) break;
+            // slot taken by a different ID — try next slot
+        }
+    }
+    barrier();
+
+    // ── Step 3: One parallel reduction pass per unique contact body ───────────
+    for (uint s = 0u; s < MAX_CONTACTS; s++) {
+        uint target = slot_id[s];
+        if (target == COLLISION_EMPTY) break;
+
+        float lw=0.0, lnx=0.0, lny=0.0, lccx=0.0, lccy=0.0;
+        float lcvx=0.0, lcvy=0.0, lci=0.0;
+
+        for (uint i = lid; i < entry_count; i += 256u) {
+            ContactEntry e = contact_entries[base + i];
+            if (e.other_id == target) {
+                lw   += e.weight;
+                lnx  += e.normal.x;
+                lny  += e.normal.y;
+                lccx += e.contact_pos.x;
+                lccy += e.contact_pos.y;
+                lcvx += e.other_vel.x;
+                lcvy += e.other_vel.y;
+                lci  += e.other_inv_m;
+            }
+        }
+
+        sh_w[lid]=lw; sh_nx[lid]=lnx; sh_ny[lid]=lny;
+        sh_ccx[lid]=lccx; sh_ccy[lid]=lccy;
+        sh_cvx[lid]=lcvx; sh_cvy[lid]=lcvy;
+        sh_ci[lid]=lci;
+        barrier();
+
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (lid < stride) {
+                sh_w[lid]   += sh_w[lid   + stride];
+                sh_nx[lid]  += sh_nx[lid  + stride];
+                sh_ny[lid]  += sh_ny[lid  + stride];
+                sh_ccx[lid] += sh_ccx[lid + stride];
+                sh_ccy[lid] += sh_ccy[lid + stride];
+                sh_cvx[lid] += sh_cvx[lid + stride];
+                sh_cvy[lid] += sh_cvy[lid + stride];
+                sh_ci[lid]  += sh_ci[lid  + stride];
+            }
+            barrier();
+        }
+
+        if (lid == 0u) {
+            uint agg_idx = body_idx * MAX_CONTACTS + s;
+            contact_agg[agg_idx].other_id         = target;
+            contact_agg[agg_idx].collision_count  = sh_w[0];
+            contact_agg[agg_idx].contact_normal   = vec2(sh_nx[0],  sh_ny[0]);
+            contact_agg[agg_idx].contact_centroid = vec2(sh_ccx[0], sh_ccy[0]);
+            contact_agg[agg_idx].contact_vel      = vec2(sh_cvx[0], sh_cvy[0]);
+            contact_agg[agg_idx].contact_inv_mass = sh_ci[0];
+        }
+        barrier();
+    }
+}

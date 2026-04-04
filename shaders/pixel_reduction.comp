@@ -1,28 +1,40 @@
-// PIXEL REDUCTION
-// takes input physics buffer and maps it to a physics buffer 4x smaller in each dimension
-// used to aggregate physics per pixel
+// pixel_reduction.comp
+//
+// Reduces per-pixel physics data to a single per-body aggregate using shared memory.
+// Fixed 256-thread workgroup with an internal loop so the same shader handles
+// all body sizes (4×4 = 16 px, 16×16 = 256 px, 64×64 = 4096 px).
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
-#extension GL_KHR_shader_subgroup_arithmetic : require
 #include "physics_types.glsl"
 
 layout(constant_id = 0) const uint BODY_W = 4u;
 layout(constant_id = 1) const uint BODY_H = 4u;
 
-layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 // ─── Bindings ─────────────────────────────────────────────────────────────────
 
-layout(set = 0, binding = 0) readonly  buffer SrcBuffer { PhysicsPixel src[]; };
-layout(set = 0, binding = 1) writeonly buffer DstBuffer { PhysicsPixel dst[]; };
+layout(set = 0, binding = 0) readonly  buffer SrcBuffer          { PhysicsPixel src[]; };
+layout(set = 0, binding = 1) writeonly buffer DstBuffer          { PhysicsPixel dst[]; };
 layout(set = 0, binding = 2) readonly  buffer ActiveIndicesBuffer { uint active_indices[]; };
 
 // ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
-    uint body_count; // active body count
+    uint body_count;
 };
+
+// ─── Shared memory ────────────────────────────────────────────────────────────
+
+shared float sh_fx[256];
+shared float sh_fy[256];
+shared float sh_fm[256];
+shared float sh_mass[256];
+shared float sh_inertia[256];
+shared float sh_collision[256];
+shared float sh_cnx[256];
+shared float sh_cny[256];
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -30,33 +42,57 @@ void main() {
     if (gl_WorkGroupID.x >= body_count) return;
     uint body_idx = active_indices[gl_WorkGroupID.x];
 
-    uint src_idx = body_idx * (BODY_W * BODY_H)
-                 + gl_LocalInvocationID.y * BODY_W
-                 + gl_LocalInvocationID.x;
+    const uint BODY_PIXELS = BODY_W * BODY_H;
+    const uint lid         = gl_LocalInvocationID.x;
 
-    PhysicsPixel s = src[src_idx];
+    float fx = 0.0, fy = 0.0, fm = 0.0, mass = 0.0;
+    float inertia = 0.0, collision = 0.0;
+    float cnx = 0.0, cny = 0.0;
 
-    float fx        = subgroupAdd(s.total_force.x);
-    float fy        = subgroupAdd(s.total_force.y);
-    float fm        = subgroupAdd(s.force_moment);
-    float mass      = subgroupAdd(s.total_mass);
-    float inertia   = subgroupAdd(s.inertia_moment);
-    float collision = subgroupAdd(s.collision_count);
-    float cnx       = subgroupAdd(s.contact_normal.x);
-    float cny       = subgroupAdd(s.contact_normal.y);
-    float ccx       = subgroupAdd(s.contact_centroid.x);
-    float ccy       = subgroupAdd(s.contact_centroid.y);
+    for (uint i = lid; i < BODY_PIXELS; i += 256u) {
+        PhysicsPixel s = src[body_idx * BODY_PIXELS + i];
+        fx        += s.total_force.x;
+        fy        += s.total_force.y;
+        fm        += s.force_moment;
+        mass      += s.total_mass;
+        inertia   += s.inertia_moment;
+        collision += s.collision_count;
+        cnx       += s.contact_normal.x;
+        cny       += s.contact_normal.y;
+    }
 
-    if (gl_SubgroupInvocationID == 0u) {
+    sh_fx[lid]        = fx;
+    sh_fy[lid]        = fy;
+    sh_fm[lid]        = fm;
+    sh_mass[lid]      = mass;
+    sh_inertia[lid]   = inertia;
+    sh_collision[lid] = collision;
+    sh_cnx[lid]       = cnx;
+    sh_cny[lid]       = cny;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            sh_fx[lid]        += sh_fx[lid + stride];
+            sh_fy[lid]        += sh_fy[lid + stride];
+            sh_fm[lid]        += sh_fm[lid + stride];
+            sh_mass[lid]      += sh_mass[lid + stride];
+            sh_inertia[lid]   += sh_inertia[lid + stride];
+            sh_collision[lid] += sh_collision[lid + stride];
+            sh_cnx[lid]       += sh_cnx[lid + stride];
+            sh_cny[lid]       += sh_cny[lid + stride];
+        }
+        barrier();
+    }
+
+    if (lid == 0u) {
         PhysicsPixel d;
-        d.total_force      = vec2(fx, fy);
-        d.force_moment     = fm;
-        d.total_mass       = mass;
-        d.inertia_moment   = inertia;
-        d.collision_count  = collision;
-        d.contact_normal   = vec2(cnx, cny);
-        d.contact_centroid = vec2(ccx, ccy);
-
-        dst[body_idx] = d; // sparse write into stable slot
+        d.total_force     = vec2(sh_fx[0], sh_fy[0]);
+        d.force_moment    = sh_fm[0];
+        d.total_mass      = sh_mass[0];
+        d.inertia_moment  = sh_inertia[0];
+        d.collision_count = sh_collision[0];
+        d.contact_normal  = vec2(sh_cnx[0], sh_cny[0]);
+        dst[body_idx] = d;
     }
 }

@@ -1,7 +1,7 @@
 // gap_fill.comp
 //
 // Fills holes left by the forward-mapped rigid body draw pass.
-// For each empty pixel (alpha == 0) with at least 2 colored neighbors,
+// For each empty pixel (alpha == 0) with at least 3 colored neighbors,
 // writes the averaged color to output_image and propagates collision data
 // from the most common neighboring body into collision_pixels.
 
@@ -31,72 +31,51 @@ layout(push_constant) uniform PushConstants {
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(width) || coord.y >= int(height)) return;
+    if (imageLoad(output_image, coord).a > 0.0) return;
 
-    if (imageLoad(output_image, coord).a > 0.0) return; // already filled
-
-    vec4  color_sum  = vec4(0.0);
+    vec4  color_sum   = vec4(0.0);
     float color_count = 0.0;
 
-    uint  fill_body_id   = COLLISION_EMPTY;
-    float fill_vel_x     = 0.0;
-    float fill_vel_y     = 0.0;
+    uint first_id    = COLLISION_EMPTY;
+    uint first_count = 0u;
+    uint second_id   = COLLISION_EMPTY;
+    uint second_count = 0u;
 
-    ivec2 cardinals[] = {ivec2(-1,0), ivec2(1,0), ivec2(0, -1), ivec2(0,1)};
+    const ivec2 cardinals[4] = {ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1)};
 
-    CollisionPixel first_type;
-    CollisionPixel second_type;
-
-    uint first_count = 0;
-    uint second_count = 0;
-    for(uint i = 0; i < 4; i++){
-        ivec2 card = cardinals[i];
-        ivec2 nc = coord + card;
-        if (nc.x < 0 || nc.y < 0 ||
-            nc.x >= int(width) || nc.y >= int(height)) continue;
+    for (uint i = 0; i < 4; i++) {
+        ivec2 nc = coord + cardinals[i];
+        if (nc.x < 0 || nc.y < 0 || nc.x >= int(width) || nc.y >= int(height)) continue;
 
         vec4 nb = imageLoad(output_image, nc);
-        if (nb.a > 0.0) {
-            color_sum   += nb;
-            color_count += 1.0;
+        if (nb.a <= 0.0) continue;
 
-            uint nb_idx = uint(nc.y) * width + uint(nc.x);
-            CollisionPixel collision = collision_pixels[nb_idx];
+        color_sum   += nb;
+        color_count += 1.0;
 
-            if(first_count == 0){
-                first_type = collision;
-            }
-            else if(second_count == 0){
-                second_type = collision;
-            }
+        uint nb_id = collision_pixels[uint(nc.y) * width + uint(nc.x)].body_id;
 
-            if(collision.body_id == first_type.body_id){
-                first_count++;
-            }
-            else if(collision.body_id == second_type.body_id){
-                second_count++;
-            }
-            else{
-                return;
-            }
+        if (nb_id == first_id) {
+            first_count++;
+        } else if (nb_id == second_id) {
+            second_count++;
+        } else if (first_count == 0u) {
+            first_id = nb_id; first_count = 1u;
+        } else if (second_count == 0u) {
+            second_id = nb_id; second_count = 1u;
+        } else {
+            return; 
         }
     }
 
-    CollisionPixel result;
-    if(first_count >= 3 && first_type.body_id != COLLISION_EMPTY && first_type.body_id != COLLISION_STATIC){
-        result = first_type;
-    }
-    else if(second_count >= 3 && second_type.body_id != COLLISION_EMPTY && second_type.body_id != COLLISION_STATIC){
-        result = second_type;
-    }
-    else{
-        return;
-    }
+    if (color_count <= 2.0) return;
+
+    uint fill_id = (first_count >= second_count) ? first_id : second_id;
+    if (fill_id == COLLISION_EMPTY || fill_id == COLLISION_STATIC) return;
+
     imageStore(output_image, coord, color_sum / color_count);
 
-    if (fill_body_id != COLLISION_EMPTY) {
-        uint dst_idx = uint(coord.y) * width + uint(coord.x);
-        collision_pixels[dst_idx].body_id = fill_body_id;
-        collision_pixels[dst_idx].vel_x   = fill_vel_x;
-        collision_pixels[dst_idx].vel_y   = fill_vel_y;
-    }
+    uint dst_idx = uint(coord.y) * width + uint(coord.x);
+    collision_pixels[dst_idx].body_id  = fill_id;
+    collision_pixels[dst_idx].body_id2 = COLLISION_EMPTY;
 }

@@ -1,7 +1,8 @@
 // pixel_physics.comp
 //
 // Evaluates physics per pixel in rigidbodies.
-// Writes per-pixel force contributions and contact data for reduction.
+// Fixed 256-thread workgroup with an internal loop so the same shader handles
+// all body sizes (4×4 = 16 px, 16×16 = 256 px, 64×64 = 4096 px).
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
@@ -10,7 +11,7 @@
 layout(constant_id = 0) const uint BODY_W = 4u;
 layout(constant_id = 1) const uint BODY_H = 4u;
 
-layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 // ─── Bindings ─────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,14 @@ layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
     uint active_indices[];
 };
 
+layout(set = 0, binding = 4) buffer ContactEntryBuffer {
+    ContactEntry contact_entries[];
+};
+
+layout(set = 0, binding = 5) buffer ContactCounterBuffer {
+    uint contact_counters[];
+};
+
 // ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
@@ -37,19 +46,38 @@ layout(push_constant) uniform PushConstants {
     float gravity;
     uint  physics_width;
     uint  physics_height;
+    uint  tier_index;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-uint sample_collision(ivec2 coord) {
+bool is_solid_at(ivec2 coord, uint self_id) {
     if (coord.x < 0 || coord.y < 0 ||
         coord.x >= int(physics_width) || coord.y >= int(physics_height))
-        return COLLISION_EMPTY;
-    return collision_pixels[coord.y * int(physics_width) + coord.x].body_id;
+        return false;
+    uint idx = uint(coord.y) * physics_width + uint(coord.x);
+    uint id1 = collision_pixels[idx].body_id;
+    uint id2 = collision_pixels[idx].body_id2;
+    return (id1 != COLLISION_EMPTY && id1 != self_id) ||
+           (id2 != COLLISION_EMPTY && id2 != self_id);
 }
 
-bool is_solid(uint body_id, uint self_id) {
-    return body_id != COLLISION_EMPTY && body_id != self_id;
+// Write one ContactEntry for a given other-body slot into the per-body ring.
+void write_contact(uint body_idx, uint other_id,
+                   float w, vec2 n, vec2 world_pos,
+                   vec2 other_vel, float other_mass)
+{
+    const uint MAX_ENTRIES = BODY_W * BODY_H * 2u; // TODO: reduce this number - probably way more memory than necessary
+    uint write_idx = atomicAdd(contact_counters[body_idx], 1u);
+    if (write_idx >= MAX_ENTRIES) return;  
+
+    uint entry_idx = body_idx * MAX_ENTRIES + write_idx;
+    contact_entries[entry_idx].other_id    = other_id;
+    contact_entries[entry_idx].weight      = w;
+    contact_entries[entry_idx].normal      = w * n;
+    contact_entries[entry_idx].contact_pos = w * world_pos;
+    contact_entries[entry_idx].other_vel   = w * other_vel;
+    contact_entries[entry_idx].other_inv_m = (other_mass > 0.0001) ? w / other_mass : 0.0;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -60,48 +88,78 @@ void main() {
 
     RigidBody body = bodies[body_idx];
 
-    vec2 local_pos = vec2(gl_LocalInvocationID.xy) - vec2(BODY_W, BODY_H) * 0.5 + 0.5;
+    uint self_id = (tier_index << 24u) | (body_idx + 1u);
 
     float c = cos(body.rotation);
     float s = sin(body.rotation);
-    vec2 world_pos = body.position + vec2(
-        c * local_pos.x - s * local_pos.y,
-        s * local_pos.x + c * local_pos.y
-    );
 
-    uint  out_idx = body.pixel_index + gl_LocalInvocationID.y * BODY_W + gl_LocalInvocationID.x;
-    float mass    = pixels[out_idx].total_mass; // set on CPU from image alpha
+    const uint BODY_PIXELS = BODY_W * BODY_H;
 
-    ivec2 coord    = ivec2(floor(world_pos));
-    uint  self_id  = body_idx + 1u;
-    bool  in_collision = is_solid(sample_collision(coord), self_id);
+    for (uint i = gl_LocalInvocationID.x; i < BODY_PIXELS; i += 256u) {
+        uint lx = i % BODY_W;
+        uint ly = i / BODY_W;
 
-    // gravity
-    vec2 force = vec2(0.0, mass * gravity);
+        vec2 local_pos = vec2(float(lx), float(ly)) - vec2(BODY_W, BODY_H) * 0.5 + 0.5;
+        vec2 world_pos = body.position + vec2(
+            c * local_pos.x - s * local_pos.y,
+            s * local_pos.x + c * local_pos.y
+        );
 
-    vec2  contact_normal   = vec2(0.0);
-    vec2  contact_centroid = vec2(0.0);
-    float contact_mass     = 0.0;
+        uint  out_idx = body.pixel_index + i;
+        float mass    = pixels[out_idx].total_mass;
 
-    if (in_collision) {
-        float sl = float(is_solid(sample_collision(coord + ivec2(-1,  0)), self_id));
-        float sr = float(is_solid(sample_collision(coord + ivec2( 1,  0)), self_id));
-        float su = float(is_solid(sample_collision(coord + ivec2( 0, -1)), self_id));
-        float sd = float(is_solid(sample_collision(coord + ivec2( 0,  1)), self_id));
+        ivec2 coord        = ivec2(floor(world_pos));
+        bool  in_collision = is_solid_at(coord, self_id);
 
-        vec2 grad = vec2(sl - sr, su - sd);
-        float glen = length(grad);
-        vec2 n = (glen > 0.001) ? grad / glen : vec2(0.0, -1.0);
+        vec2 force = vec2(0.0, mass * gravity);
+        vec2 r     = world_pos - body.position;
 
-        contact_normal   = mass * n;
-        contact_centroid = mass * world_pos;
-        contact_mass     = mass;
+        vec2  contact_normal   = vec2(0.0);
+        float collision_weight = 0.0;
+
+        if (in_collision) {
+            float sl = float(is_solid_at(coord + ivec2(-1,  0), self_id));
+            float sr = float(is_solid_at(coord + ivec2( 1,  0), self_id));
+            float su = float(is_solid_at(coord + ivec2( 0, -1), self_id));
+            float sd = float(is_solid_at(coord + ivec2( 0,  1), self_id));
+
+            vec2  grad = vec2(sl - sr, su - sd);
+            float glen = length(grad);
+            vec2  n    = (glen > 0.001) ? grad / glen : vec2(0.0);
+
+            uint cp_idx = uint(coord.y) * physics_width + uint(coord.x);
+            uint cid1   = collision_pixels[cp_idx].body_id;
+            uint cid2   = collision_pixels[cp_idx].body_id2;
+
+            vec2 my_vel = body.velocity + body.angular_velocity * vec2(-r.y, r.x);
+
+            // ── Slot 1 ──────────────────────────────────────────────────────
+            if (cid1 != COLLISION_EMPTY && cid1 != self_id) {
+                vec2  ov  = vec2(collision_pixels[cp_idx].vel_x, collision_pixels[cp_idx].vel_y);
+                float om  = collision_pixels[cp_idx].mass;
+                float app = max(0.0, -dot(my_vel - ov, n));
+                float w   = mass * (1.0 + app);
+                contact_normal   += w * n;
+                collision_weight += w;
+                write_contact(body_idx, cid1, w, n, world_pos, ov, om);
+            }
+
+            // ── Slot 2 ──────────────────────────────────────────────────────
+            if (cid2 != COLLISION_EMPTY && cid2 != self_id) {
+                vec2  ov  = vec2(collision_pixels[cp_idx].vel_x2, collision_pixels[cp_idx].vel_y2);
+                float om  = collision_pixels[cp_idx].mass2;
+                float app = max(0.0, -dot(my_vel - ov, n));
+                float w   = mass * (1.0 + app);
+                contact_normal   += w * n;
+                collision_weight += w;
+                write_contact(body_idx, cid2, w, n, world_pos, ov, om);
+            }
+        }
+
+        pixels[out_idx].total_force     = force;
+        pixels[out_idx].force_moment    = r.x * force.y - r.y * force.x;
+        pixels[out_idx].inertia_moment  = mass * dot(r, r);
+        pixels[out_idx].collision_count = collision_weight;
+        pixels[out_idx].contact_normal  = contact_normal;
     }
-
-    pixels[out_idx].total_force     = force;
-    pixels[out_idx].force_moment    = world_pos.x * force.y - world_pos.y * force.x;
-    pixels[out_idx].inertia_moment  = mass * dot(world_pos, world_pos);
-    pixels[out_idx].collision_count = contact_mass;
-    pixels[out_idx].contact_normal  = contact_normal;
-    pixels[out_idx].contact_centroid= contact_centroid;
 }

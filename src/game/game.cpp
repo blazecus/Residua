@@ -21,6 +21,8 @@ void Game::init() {
 	engine.init(_windowExtent, _window);
 
 	ball_image = load_body_image("../assets/physics/ball.png");
+	cshape = load_body_image("../assets/physics/cshape.png");
+	star = load_body_image("../assets/physics/star.png");
 
 	physics.init(&engine, 256);
 	physics.upload_collision_layer(&engine, "../assets/physics/collision_layer.png");
@@ -76,7 +78,27 @@ void Game::run() {
 				mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
-			physics.add_body(&engine, ball_image, spawn_pos);
+			physics.add_body(&engine, ball_image, 0, spawn_pos);
+			lastSpawn = 0;
+		}
+		else if(input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
+			int mx, my;
+			SDL_GetMouseState(&mx, &my);
+			glm::vec2 spawn_pos = {
+				mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
+				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+			};
+			physics.add_body(&engine, cshape, 1, spawn_pos);
+			lastSpawn = 0;
+		}
+		else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 30) {
+			int mx, my;
+			SDL_GetMouseState(&mx, &my);
+			glm::vec2 spawn_pos = {
+				mx * float(PHYSICS_WIDTH) / float(_windowExtent.width),
+				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+			};
+			physics.add_body(&engine, star, 2, spawn_pos);
 			lastSpawn = 0;
 		}
 		if (input.blou(InputManager::InputType::INSPECT)) {
@@ -87,8 +109,8 @@ void Game::run() {
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
 
-			if (auto slot = physics.body_at(check_pos)) {
-				physics.remove_body(*slot);
+			if (auto hit = physics.body_at(check_pos)) {
+				physics.remove_body(hit->first, hit->second);
 			}
 		}
 

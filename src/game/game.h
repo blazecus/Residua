@@ -31,7 +31,9 @@ public:
 
 	Client client;
 
-	LoadedBodyImage ball_image;
+	LoadedBodyImage ball_image;  // 4×4 (tier 0)
+	LoadedBodyImage cshape;
+	LoadedBodyImage star;
 
 	void SDL_setup();
 
