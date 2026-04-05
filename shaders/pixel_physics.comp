@@ -122,16 +122,12 @@ void main() {
         float collision_weight = 0.0;
 
         if (in_collision) {
-            // ── Compute contact normal and penetration depth ──────────────────
-            // Use static SDF gradient when inside static geometry (accurate).
-            // Fall back to collision-grid gradient for body-body contacts.
             uint  sdf_idx  = uint(coord.y) * physics_width + uint(coord.x);
             float sdf_val  = static_sdf[sdf_idx];
             float contact_depth;
             vec2  n;
 
             if (sdf_val < 0.0) {
-                // Inside static geometry: SDF gives exact depth and gradient
                 contact_depth = -sdf_val;
                 int   ix = coord.x, iy = coord.y;
                 int   wi = int(physics_width), hi = int(physics_height);
@@ -142,7 +138,6 @@ void main() {
                 float glen = length(vec2(dx, dy));
                 n = (glen > 0.001) ? vec2(dx, dy) / glen : vec2(0.0, -1.0);
             } else {
-                // Body-body contact: estimate normal from collision grid
                 contact_depth = 1.0;
                 float sl = float(is_solid_at(coord + ivec2(-1,  0), self_id));
                 float sr = float(is_solid_at(coord + ivec2( 1,  0), self_id));

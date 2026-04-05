@@ -1,9 +1,4 @@
 // gap_fill.comp
-//
-// Fills holes left by the forward-mapped rigid body draw pass.
-// For each empty pixel (alpha == 0) with at least 3 colored neighbors,
-// writes the averaged color to output_image and propagates collision data
-// from the most common neighboring body into collision_pixels.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require

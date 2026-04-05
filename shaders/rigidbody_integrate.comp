@@ -1,12 +1,4 @@
 // rigidbody_integrate.comp
-//
-// Sequential-Impulse (SI) integrator (Erin Catto style).
-// Reads a ContactPoint manifold (up to MAX_MANIFOLD_POINTS contacts per body)
-// and iterates 8 times, clamping the accumulated normal impulse λ_n ≥ 0 and
-// the tangential (friction) impulse |λ_t| ≤ μ·λ_n each iteration.
-// Baumgarte positional correction is handled as a velocity bias inside the loop,
-// so no separate position-correction pass is needed.
-// One thread per rigid body.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
@@ -62,22 +54,17 @@ void main() {
     float I      = max(agg.inertia_moment, 0.0001);
     float torque = agg.force_moment;
 
-    // ── Predict velocity from external forces (gravity / torque) ─────────────
     vec2  new_velocity         = body.velocity + (agg.total_force / mass) * dt;
     float new_angular_velocity = body.angular_velocity + (torque / I) * dt;
 
-    // ── Load contact manifold ─────────────────────────────────────────────────
     uint base_mp = idx * MAX_MANIFOLD_POINTS;
     ContactPoint contacts[MAX_MANIFOLD_POINTS];
     for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++)
         contacts[cp] = contact_manifold[base_mp + cp];
 
-    // ── Pre-compute per-contact K, bias, and restitution target ──────────────
-    // These are fixed for the whole SI loop — restitution uses the pre-loop
-    // relative velocity so later iterations can't reduce it.
     float K_n_arr  [MAX_MANIFOLD_POINTS];
     float K_t_arr  [MAX_MANIFOLD_POINTS];
-    float target_arr[MAX_MANIFOLD_POINTS];  // fixed v_n target for this frame
+    float target_arr[MAX_MANIFOLD_POINTS];  
 
     for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++) {
         K_n_arr[cp]   = 0.0;
@@ -98,8 +85,6 @@ void main() {
         vec2  v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
         float v_n_init  = dot(v_contact - contacts[cp].other_vel, n);
 
-        // Baumgarte: slop = depth = 1.0, so bias is zero for all current contacts.
-        // Will be non-zero if contact_manifold ever writes depth > 1.0.
         float bias            = (0.2 / dt) * max(contacts[cp].depth - 1.0, 0.0);
         // Threshold ~10 px/s ≈ 6 frames of free-fall under gravity=100.
         float restitution_vel = (v_n_init < -10.0) ? -restitution * v_n_init : 0.0;
