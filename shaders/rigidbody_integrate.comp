@@ -1,8 +1,11 @@
 // rigidbody_integrate.comp
 //
-// Symplectic Euler integrator.
-// Applies one impulse per unique colliding body (from ContactAggregate),
-// plus Baumgarte positional correction from the overall body_l0 aggregate.
+// Sequential-Impulse (SI) integrator (Erin Catto style).
+// Reads a ContactPoint manifold (up to MAX_MANIFOLD_POINTS contacts per body)
+// and iterates 8 times, clamping the accumulated normal impulse λ_n ≥ 0 and
+// the tangential (friction) impulse |λ_t| ≤ μ·λ_n each iteration.
+// Baumgarte positional correction is handled as a velocity bias inside the loop,
+// so no separate position-correction pass is needed.
 // One thread per rigid body.
 
 #version 460
@@ -32,8 +35,8 @@ layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
     uint active_indices[];
 };
 
-layout(set = 0, binding = 4) readonly buffer ContactAggBuffer {
-    ContactAggregate contacts[];
+layout(set = 0, binding = 4) readonly buffer ContactManifoldBuffer {
+    ContactPoint contact_manifold[];
 };
 
 // ─── Push constants ───────────────────────────────────────────────────────────
@@ -59,83 +62,104 @@ void main() {
     float I      = max(agg.inertia_moment, 0.0001);
     float torque = agg.force_moment;
 
-    // ── Symplectic Euler — gravity / torque ───────────────────────────────────
-    vec2  new_velocity         = body.velocity         + (agg.total_force / mass) * dt;
+    // ── Predict velocity from external forces (gravity / torque) ─────────────
+    vec2  new_velocity         = body.velocity + (agg.total_force / mass) * dt;
     float new_angular_velocity = body.angular_velocity + (torque / I) * dt;
 
-    vec2 baumgarte_correction = vec2(0.0);
+    // ── Load contact manifold ─────────────────────────────────────────────────
+    uint base_mp = idx * MAX_MANIFOLD_POINTS;
+    ContactPoint contacts[MAX_MANIFOLD_POINTS];
+    for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++)
+        contacts[cp] = contact_manifold[base_mp + cp];
 
-    // ── One impulse per unique colliding body ─────────────────────────────────
-    for (uint ci = 0u; ci < MAX_CONTACTS; ci++) {
-        ContactAggregate ca = contacts[idx * MAX_CONTACTS + ci];
-        if (ca.other_id == COLLISION_EMPTY) break;
+    // ── Pre-compute per-contact K, bias, and restitution target ──────────────
+    // These are fixed for the whole SI loop — restitution uses the pre-loop
+    // relative velocity so later iterations can't reduce it.
+    float K_n_arr  [MAX_MANIFOLD_POINTS];
+    float K_t_arr  [MAX_MANIFOLD_POINTS];
+    float target_arr[MAX_MANIFOLD_POINTS];  // fixed v_n target for this frame
 
-        float wsum = ca.collision_count;
-        if (wsum < 0.0001) continue;
+    for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++) {
+        K_n_arr[cp]   = 0.0;
+        K_t_arr[cp]   = 0.0;
+        target_arr[cp] = 0.0;
+        if (contacts[cp].other_id == COLLISION_EMPTY) continue;
 
-        float nlen = length(ca.contact_normal);
-        if (nlen < 0.001) continue;
-        vec2 n = ca.contact_normal / nlen;
+        vec2  n = contacts[cp].normal;
+        vec2  t = vec2(-n.y, n.x);
+        vec2  r         = contacts[cp].position - body.position;
+        float r_cross_n = r.x * n.y - r.y * n.x;
+        float r_cross_t = r.x * t.y - r.y * t.x;
 
-        // Remove gravity component that would push us into this surface
-        float force_n = dot(agg.total_force / mass * dt, n);
-        if (force_n < 0.0) new_velocity -= force_n * n;
+        float other_inv_m = contacts[cp].other_inv_m;  // no clamp: correct 2-body effective mass
+        K_n_arr[cp] = 1.0 / mass + other_inv_m + (r_cross_n * r_cross_n) / I;
+        K_t_arr[cp] = 1.0 / mass + other_inv_m + (r_cross_t * r_cross_t) / I;
 
-        vec2  contact_pos = ca.contact_centroid / wsum;
-        vec2  r           = contact_pos - body.position;
-        float r_cross_n   = r.x * n.y - r.y * n.x;
+        vec2  v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
+        float v_n_init  = dot(v_contact - contacts[cp].other_vel, n);
 
-        float raw_inv_m   = ca.contact_inv_mass / wsum;
-        float other_inv_m = min(raw_inv_m, 1.0 / mass);
-        float denom       = 1.0 / mass + other_inv_m + (r_cross_n * r_cross_n) / I;
-
-        vec2  other_vel = (raw_inv_m > 0.0001) ? ca.contact_vel / wsum : vec2(0.0);
-        vec2  v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x) - other_vel;
-        float v_n       = dot(v_contact, n);
-
-        if (v_n < 0.0) {
-            const float BOUNCE_THRESHOLD = 1.5;
-            float e = abs(v_n) > BOUNCE_THRESHOLD ? restitution : 0.0;
-            float J = -(1.0 + e) * v_n / denom;
-
-            if (J > 0.0) {
-                new_velocity         += (J / mass) * n;
-                new_angular_velocity += (r_cross_n * J) / I;
-
-                // Coulomb friction
-                vec2  v_t     = v_contact - v_n * n;
-                float v_t_len = length(v_t);
-                if (v_t_len > 0.001) {
-                    vec2  t         = v_t / v_t_len;
-                    float r_cross_t = r.x * t.y - r.y * t.x;
-                    float denom_t   = 1.0 / mass + (r_cross_t * r_cross_t) / I;
-                    float J_t       = min(0.4 * J, v_t_len / denom_t);
-                    new_velocity         -= (J_t / mass) * t;
-                    new_angular_velocity -= (r_cross_t * J_t) / I;
-                }
-            }
-        }
-
-        // Ensure final velocity is not still moving into this surface
-        float vn_com = dot(new_velocity, n);
-        if (vn_com < 0.0) new_velocity -= vn_com * n;
+        // Baumgarte: slop = depth = 1.0, so bias is zero for all current contacts.
+        // Will be non-zero if contact_manifold ever writes depth > 1.0.
+        float bias            = (0.2 / dt) * max(contacts[cp].depth - 1.0, 0.0);
+        // Threshold ~10 px/s ≈ 6 frames of free-fall under gravity=100.
+        float restitution_vel = (v_n_init < -10.0) ? -restitution * v_n_init : 0.0;
+        target_arr[cp]        = max(bias, restitution_vel);
     }
 
-    // ── Baumgarte positional correction  ─────────
-    if (agg.collision_count > 0.0001) {
-        float nlen = length(agg.contact_normal);
-        if (nlen > 0.001) {
-            vec2  n          = agg.contact_normal / nlen;
-            float pen_pixels = agg.collision_count / float(BODY_W);
-            float pen_excess = max(pen_pixels - 0.5, 0.0);
-            if (pen_excess > 0.001)
-                baumgarte_correction = n * min(pen_excess * 0.15, 0.8);
+    // ── Accumulated impulses (reset each frame — no warm-starting) ────────────
+    float lambda_n[MAX_MANIFOLD_POINTS];
+    float lambda_t[MAX_MANIFOLD_POINTS];
+    for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++) {
+        lambda_n[cp] = 0.0;
+        lambda_t[cp] = 0.0;
+    }
+
+    // ── Sequential impulse iterations ────────────────────────────────────────
+    const int SI_ITERS = 8;
+    for (int iter = 0; iter < SI_ITERS; iter++) {
+        for (uint cp = 0u; cp < MAX_MANIFOLD_POINTS; cp++) {
+            if (contacts[cp].other_id == COLLISION_EMPTY) continue;
+
+            vec2  n = contacts[cp].normal;
+            vec2  t = vec2(-n.y, n.x);
+            vec2  r         = contacts[cp].position - body.position;
+            float r_cross_n = r.x * n.y - r.y * n.x;
+            float r_cross_t = r.x * t.y - r.y * t.x;
+
+            float K_n = K_n_arr[cp];
+            float K_t = K_t_arr[cp];
+
+            vec2  v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
+            float v_n       = dot(v_contact - contacts[cp].other_vel, n);
+
+            // Normal impulse — clamp accumulated so λ_n ≥ 0
+            float delta_n  = (target_arr[cp] - v_n) / K_n;
+            float old_n    = lambda_n[cp];
+            lambda_n[cp]   = max(old_n + delta_n, 0.0);
+            float actual_n = lambda_n[cp] - old_n;
+
+            new_velocity         += (actual_n / mass) * n;
+            new_angular_velocity += r_cross_n * actual_n / I;
+
+            // Friction impulse — Coulomb cone: |λ_t| ≤ μ·λ_n
+            v_contact = new_velocity + new_angular_velocity * vec2(-r.y, r.x);
+            float v_t      = dot(v_contact - contacts[cp].other_vel, t);
+            float delta_t  = -v_t / K_t;
+            float old_t    = lambda_t[cp];
+            float friction_limit = 0.3 * lambda_n[cp];
+            lambda_t[cp]   = clamp(old_t + delta_t, -friction_limit, friction_limit);
+            float actual_t = lambda_t[cp] - old_t;
+
+            new_velocity         += (actual_t / mass) * t;
+            new_angular_velocity += r_cross_t * actual_t / I;
         }
     }
 
-    // TODO: better damping (needs dt independence)
+    // ── Damping ───────────────────────────────────────────────────────────────
+    // TODO: make dt-independent
     new_velocity *= 0.995;
 
+    // ── Sleep condition ───────────────────────────────────────────────────────
     if (agg.collision_count > 0.0001) {
         if (length(new_velocity) < 0.1 && abs(new_angular_velocity) < 0.2) {
             new_velocity         = vec2(0.0);
@@ -143,10 +167,8 @@ void main() {
         }
     }
 
-    vec2  new_position = body.position + new_velocity         * dt + baumgarte_correction;
+    vec2  new_position = body.position + new_velocity         * dt;
     float new_rotation = body.rotation + new_angular_velocity * dt;
-
-    float I_com_new = max(agg.inertia_moment, 0.0001);
 
     RigidBody out_body;
     out_body.position         = new_position;
@@ -154,7 +176,7 @@ void main() {
     out_body.total_mass       = mass;
     out_body.velocity         = new_velocity;
     out_body.angular_velocity = new_angular_velocity;
-    out_body.I_com            = I_com_new;
+    out_body.I_com            = max(agg.inertia_moment, 0.0001);
     out_body.pixel_index      = body.pixel_index;
     out_body._pad             = 0u;
 

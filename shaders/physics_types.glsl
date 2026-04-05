@@ -32,25 +32,26 @@ struct ContactEntry {
     vec2  contact_pos;  // weight × world_pos  (for contact point r)
     vec2  other_vel;    // weight × other_body_velocity
     float other_inv_m;  // weight / other_mass  (0 for static / infinite mass)
-    float _pad;
+    float depth;        // weight × penetration depth in pixels (from SDF; 1.0 fallback)
 };
 
 // 40 bytes (std430)
-// Written by contact_reduction.comp — one per unique colliding body per rigid body.
-struct ContactAggregate {
-    uint  other_id;
-    float collision_count;  // Σ weight
-    vec2  contact_normal;   // Σ (weight × n)
-    vec2  contact_centroid; // Σ (weight × world_pos)
-    vec2  contact_vel;      // Σ (weight × other_vel)
-    float contact_inv_mass; // Σ (weight / other_mass)
+// Written by contact_manifold.comp — up to 2 extreme contact points per unique colliding body.
+struct ContactPoint {
+    uint  other_id;      // COLLISION_EMPTY = unused slot
+    float depth;         // penetration depth estimate (pixels)
+    vec2  position;      // world-space contact position      (offset 8)
+    vec2  normal;        // outward contact normal (normalised)(offset 16)
+    vec2  other_vel;     // velocity of other body at contact  (offset 24)
+    float other_inv_m;   // 1/mass of other body (0 for static)(offset 32)
     float _pad;
 };
 
 #define COLLISION_EMPTY  0u
 #define COLLISION_STATIC 0xFFFFFFFFu
 
-#define MAX_CONTACTS 4u
+#define MAX_CONTACTS       4u   // unique other-body slots per body
+#define MAX_MANIFOLD_POINTS 8u  // 2 contact points × MAX_CONTACTS
 
 // 32 bytes (std430)
 struct CollisionPixel {

@@ -1,0 +1,222 @@
+// contact_manifold.comp
+//
+// Converts raw ContactEntry records (one per colliding pixel, written by pixel_physics.comp)
+// into a compact ContactPoint manifold for the sequential-impulse integrator.
+//
+// For each unique colliding body pair, produces up to 2 ContactPoints:
+//   • the entry whose contact position has the smallest x-coordinate  (left extreme)
+//   • the entry whose contact position has the largest  x-coordinate  (right extreme)
+// If both extremes resolve to the same pixel, only one point is written.
+//
+// One workgroup per active body; 256 threads; internal loop over entries.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "physics_types.glsl"
+
+layout(constant_id = 0) const uint BODY_W = 4u;
+layout(constant_id = 1) const uint BODY_H = 4u;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+
+layout(set = 0, binding = 0) readonly buffer ContactEntryBuffer {
+    ContactEntry contact_entries[];
+};
+
+layout(set = 0, binding = 1) readonly buffer ContactCounterBuffer {
+    uint contact_counters[];
+};
+
+layout(set = 0, binding = 2) buffer ContactManifoldBuffer {
+    ContactPoint contact_manifold[];
+};
+
+layout(set = 0, binding = 3) readonly buffer ActiveIndicesBuffer {
+    uint active_indices[];
+};
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+
+layout(push_constant) uniform PushConstants {
+    uint body_count;
+};
+
+// ─── Shared memory ────────────────────────────────────────────────────────────
+
+shared uint slot_id[MAX_CONTACTS];   // unique other-body IDs discovered this frame
+
+// Normal & weight accumulation (for computing the shared contact normal)
+shared float sh_w  [256];
+shared float sh_nx [256];
+shared float sh_ny [256];
+
+// Min x-projected contact point (left extreme)
+shared float sh_min_proj[256];
+shared float sh_min_px  [256];
+shared float sh_min_py  [256];
+shared float sh_min_vx  [256];
+shared float sh_min_vy  [256];
+shared float sh_min_im  [256];
+
+// Max x-projected contact point (right extreme)
+shared float sh_max_proj[256];
+shared float sh_max_px  [256];
+shared float sh_max_py  [256];
+shared float sh_max_vx  [256];
+shared float sh_max_vy  [256];
+shared float sh_max_im  [256];
+
+// Penetration depth at each extreme contact point
+shared float sh_min_d[256];
+shared float sh_max_d[256];
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+    if (gl_WorkGroupID.x >= body_count) return;
+    uint body_idx = active_indices[gl_WorkGroupID.x];
+    uint lid      = gl_LocalInvocationID.x;
+
+    const uint MAX_ENTRIES = BODY_W * BODY_H * 2u;
+    uint base        = body_idx * MAX_ENTRIES;
+    uint entry_count = min(contact_counters[body_idx], MAX_ENTRIES);
+
+    // ── Step 1: Clear output manifold and shared slot table ───────────────────
+    if (lid < MAX_CONTACTS) {
+        slot_id[lid] = COLLISION_EMPTY;
+    }
+    if (lid < MAX_MANIFOLD_POINTS) {
+        uint mp_idx = body_idx * MAX_MANIFOLD_POINTS + lid;
+        contact_manifold[mp_idx].other_id    = COLLISION_EMPTY;
+        contact_manifold[mp_idx].depth       = 0.0;
+        contact_manifold[mp_idx].position    = vec2(0.0);
+        contact_manifold[mp_idx].normal      = vec2(0.0);
+        contact_manifold[mp_idx].other_vel   = vec2(0.0);
+        contact_manifold[mp_idx].other_inv_m = 0.0;
+    }
+    barrier();
+
+    // ── Step 2: Discover unique other-body IDs via atomicCompSwap ─────────────
+    for (uint i = lid; i < entry_count; i += 256u) {
+        uint oid = contact_entries[base + i].other_id;
+        if (oid == COLLISION_EMPTY) continue;
+        for (uint s = 0u; s < MAX_CONTACTS; s++) {
+            uint prev = atomicCompSwap(slot_id[s], COLLISION_EMPTY, oid);
+            if (prev == COLLISION_EMPTY || prev == oid) break;
+        }
+    }
+    barrier();
+
+    // ── Step 3: One reduction pass per unique contact body → 2 ContactPoints ──
+    uint write_slot = 0u;
+    for (uint s = 0u; s < MAX_CONTACTS; s++) {
+        uint target = slot_id[s];
+        if (target == COLLISION_EMPTY) break;
+        if (write_slot >= MAX_MANIFOLD_POINTS) break;
+
+        // Per-thread local accumulation ───────────────────────────────────────
+        float lw    = 0.0, lnx = 0.0, lny = 0.0;
+        float lminp =  1e30;
+        float lmaxp = -1e30;
+        float lmin_px = 0.0, lmin_py = 0.0, lmin_vx = 0.0, lmin_vy = 0.0, lmin_im = 0.0, lmin_d = 0.0;
+        float lmax_px = 0.0, lmax_py = 0.0, lmax_vx = 0.0, lmax_vy = 0.0, lmax_im = 0.0, lmax_d = 0.0;
+
+        for (uint i = lid; i < entry_count; i += 256u) {
+            ContactEntry e = contact_entries[base + i];
+            if (e.other_id != target) continue;
+
+            lw  += e.weight;
+            lnx += e.normal.x;
+            lny += e.normal.y;
+
+            float inv_w = (e.weight > 1e-6) ? 1.0 / e.weight : 0.0;
+            float cpx = e.contact_pos.x * inv_w;
+            float cpy = e.contact_pos.y * inv_w;
+            float cvx = e.other_vel.x   * inv_w;
+            float cvy = e.other_vel.y   * inv_w;
+            float cim = e.other_inv_m   * inv_w;
+            float cd  = e.depth         * inv_w;
+
+            if (cpx < lminp) {
+                lminp   = cpx;
+                lmin_px = cpx; lmin_py = cpy;
+                lmin_vx = cvx; lmin_vy = cvy; lmin_im = cim; lmin_d = cd;
+            }
+            if (cpx > lmaxp) {
+                lmaxp   = cpx;
+                lmax_px = cpx; lmax_py = cpy;
+                lmax_vx = cvx; lmax_vy = cvy; lmax_im = cim; lmax_d = cd;
+            }
+        }
+
+        sh_w[lid]   = lw;  sh_nx[lid] = lnx; sh_ny[lid] = lny;
+        sh_min_proj[lid] = lminp;
+        sh_min_px[lid] = lmin_px; sh_min_py[lid] = lmin_py;
+        sh_min_vx[lid] = lmin_vx; sh_min_vy[lid] = lmin_vy; sh_min_im[lid] = lmin_im; sh_min_d[lid] = lmin_d;
+        sh_max_proj[lid] = lmaxp;
+        sh_max_px[lid] = lmax_px; sh_max_py[lid] = lmax_py;
+        sh_max_vx[lid] = lmax_vx; sh_max_vy[lid] = lmax_vy; sh_max_im[lid] = lmax_im; sh_max_d[lid] = lmax_d;
+        barrier();
+
+        // Tree reduce ─────────────────────────────────────────────────────────
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (lid < stride) {
+                sh_w[lid]  += sh_w[lid  + stride];
+                sh_nx[lid] += sh_nx[lid + stride];
+                sh_ny[lid] += sh_ny[lid + stride];
+
+                if (sh_min_proj[lid + stride] < sh_min_proj[lid]) {
+                    sh_min_proj[lid] = sh_min_proj[lid + stride];
+                    sh_min_px[lid]   = sh_min_px[lid + stride];
+                    sh_min_py[lid]   = sh_min_py[lid + stride];
+                    sh_min_vx[lid]   = sh_min_vx[lid + stride];
+                    sh_min_vy[lid]   = sh_min_vy[lid + stride];
+                    sh_min_im[lid]   = sh_min_im[lid + stride];
+                    sh_min_d[lid]    = sh_min_d[lid + stride];
+                }
+                if (sh_max_proj[lid + stride] > sh_max_proj[lid]) {
+                    sh_max_proj[lid] = sh_max_proj[lid + stride];
+                    sh_max_px[lid]   = sh_max_px[lid + stride];
+                    sh_max_py[lid]   = sh_max_py[lid + stride];
+                    sh_max_vx[lid]   = sh_max_vx[lid + stride];
+                    sh_max_vy[lid]   = sh_max_vy[lid + stride];
+                    sh_max_im[lid]   = sh_max_im[lid + stride];
+                    sh_max_d[lid]    = sh_max_d[lid + stride];
+                }
+            }
+            barrier();
+        }
+
+        // Thread 0 writes up to 2 ContactPoints ───────────────────────────────
+        if (lid == 0u && sh_w[0] > 1e-6 && sh_min_proj[0] < 1e29) {
+            float nlen = length(vec2(sh_nx[0], sh_ny[0]));
+            vec2  n    = (nlen > 1e-6) ? vec2(sh_nx[0], sh_ny[0]) / nlen : vec2(0.0, -1.0);
+
+            uint mp0 = body_idx * MAX_MANIFOLD_POINTS + write_slot;
+            contact_manifold[mp0].other_id    = target;
+            contact_manifold[mp0].depth       = max(sh_min_d[0], 0.0);
+            contact_manifold[mp0].position    = vec2(sh_min_px[0], sh_min_py[0]);
+            contact_manifold[mp0].normal      = n;
+            contact_manifold[mp0].other_vel   = vec2(sh_min_vx[0], sh_min_vy[0]);
+            contact_manifold[mp0].other_inv_m = sh_min_im[0];
+
+            // Only write a second point if it's spatially distinct (> 0.5 px apart)
+            if (abs(sh_max_proj[0] - sh_min_proj[0]) > 0.5 &&
+                write_slot + 1u < MAX_MANIFOLD_POINTS) {
+                uint mp1 = body_idx * MAX_MANIFOLD_POINTS + write_slot + 1u;
+                contact_manifold[mp1].other_id    = target;
+                contact_manifold[mp1].depth       = max(sh_max_d[0], 0.0);
+                contact_manifold[mp1].position    = vec2(sh_max_px[0], sh_max_py[0]);
+                contact_manifold[mp1].normal      = n;
+                contact_manifold[mp1].other_vel   = vec2(sh_max_vx[0], sh_max_vy[0]);
+                contact_manifold[mp1].other_inv_m = sh_max_im[0];
+            }
+        }
+
+        // Advance by 2 slots (one pair reserved per unique body)
+        write_slot += 2u;
+        barrier();
+    }
+}

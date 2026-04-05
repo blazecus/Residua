@@ -39,6 +39,10 @@ layout(set = 0, binding = 5) buffer ContactCounterBuffer {
     uint contact_counters[];
 };
 
+layout(set = 0, binding = 6) readonly buffer StaticSdfBuffer {
+    float static_sdf[];
+};
+
 // ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
@@ -62,14 +66,13 @@ bool is_solid_at(ivec2 coord, uint self_id) {
            (id2 != COLLISION_EMPTY && id2 != self_id);
 }
 
-// Write one ContactEntry for a given other-body slot into the per-body ring.
 void write_contact(uint body_idx, uint other_id,
                    float w, vec2 n, vec2 world_pos,
-                   vec2 other_vel, float other_mass)
+                   vec2 other_vel, float other_mass, float depth)
 {
-    const uint MAX_ENTRIES = BODY_W * BODY_H * 2u; // TODO: reduce this number - probably way more memory than necessary
+    const uint MAX_ENTRIES = BODY_W * BODY_H * 2u;
     uint write_idx = atomicAdd(contact_counters[body_idx], 1u);
-    if (write_idx >= MAX_ENTRIES) return;  
+    if (write_idx >= MAX_ENTRIES) return;
 
     uint entry_idx = body_idx * MAX_ENTRIES + write_idx;
     contact_entries[entry_idx].other_id    = other_id;
@@ -78,6 +81,7 @@ void write_contact(uint body_idx, uint other_id,
     contact_entries[entry_idx].contact_pos = w * world_pos;
     contact_entries[entry_idx].other_vel   = w * other_vel;
     contact_entries[entry_idx].other_inv_m = (other_mass > 0.0001) ? w / other_mass : 0.0;
+    contact_entries[entry_idx].depth       = w * depth;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -118,14 +122,36 @@ void main() {
         float collision_weight = 0.0;
 
         if (in_collision) {
-            float sl = float(is_solid_at(coord + ivec2(-1,  0), self_id));
-            float sr = float(is_solid_at(coord + ivec2( 1,  0), self_id));
-            float su = float(is_solid_at(coord + ivec2( 0, -1), self_id));
-            float sd = float(is_solid_at(coord + ivec2( 0,  1), self_id));
+            // ── Compute contact normal and penetration depth ──────────────────
+            // Use static SDF gradient when inside static geometry (accurate).
+            // Fall back to collision-grid gradient for body-body contacts.
+            uint  sdf_idx  = uint(coord.y) * physics_width + uint(coord.x);
+            float sdf_val  = static_sdf[sdf_idx];
+            float contact_depth;
+            vec2  n;
 
-            vec2  grad = vec2(sl - sr, su - sd);
-            float glen = length(grad);
-            vec2  n    = (glen > 0.001) ? grad / glen : vec2(0.0);
+            if (sdf_val < 0.0) {
+                // Inside static geometry: SDF gives exact depth and gradient
+                contact_depth = -sdf_val;
+                int   ix = coord.x, iy = coord.y;
+                int   wi = int(physics_width), hi = int(physics_height);
+                float dx = static_sdf[iy * wi + min(ix + 1, wi - 1)]
+                         - static_sdf[iy * wi + max(ix - 1, 0)];
+                float dy = static_sdf[min(iy + 1, hi - 1) * wi + ix]
+                         - static_sdf[max(iy - 1, 0)      * wi + ix];
+                float glen = length(vec2(dx, dy));
+                n = (glen > 0.001) ? vec2(dx, dy) / glen : vec2(0.0, -1.0);
+            } else {
+                // Body-body contact: estimate normal from collision grid
+                contact_depth = 1.0;
+                float sl = float(is_solid_at(coord + ivec2(-1,  0), self_id));
+                float sr = float(is_solid_at(coord + ivec2( 1,  0), self_id));
+                float su = float(is_solid_at(coord + ivec2( 0, -1), self_id));
+                float sd = float(is_solid_at(coord + ivec2( 0,  1), self_id));
+                vec2  grad = vec2(sl - sr, su - sd);
+                float glen = length(grad);
+                n = (glen > 0.001) ? grad / glen : vec2(0.0, -1.0);
+            }
 
             uint cp_idx = uint(coord.y) * physics_width + uint(coord.x);
             uint cid1   = collision_pixels[cp_idx].body_id;
@@ -141,7 +167,7 @@ void main() {
                 float w   = mass * (1.0 + app);
                 contact_normal   += w * n;
                 collision_weight += w;
-                write_contact(body_idx, cid1, w, n, world_pos, ov, om);
+                write_contact(body_idx, cid1, w, n, world_pos, ov, om, contact_depth);
             }
 
             // ── Slot 2 ──────────────────────────────────────────────────────
@@ -152,7 +178,7 @@ void main() {
                 float w   = mass * (1.0 + app);
                 contact_normal   += w * n;
                 collision_weight += w;
-                write_contact(body_idx, cid2, w, n, world_pos, ov, om);
+                write_contact(body_idx, cid2, w, n, world_pos, ov, om, contact_depth);
             }
         }
 

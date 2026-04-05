@@ -6,6 +6,7 @@
 #include <vector>
 #include "../renderer/vk_types.h"
 #include "../renderer/vk_descriptors.h"
+#include "sdf_generator.h"
 
 class ResiduaEngine;
 
@@ -43,22 +44,22 @@ struct ContactEntry {       // 40 bytes
     float    centroid_x,    centroid_y;
     float    other_vel_x,   other_vel_y;
     float    other_inv_m;
-    float    _pad{0};
+    float    depth{0};
 };
 static_assert(sizeof(ContactEntry) == 40);
 
-struct ContactAggregate {   // 40 bytes
+struct ContactPoint {       // 40 bytes
     uint32_t other_id{0};
-    float    collision_count{0};
-    float    normal_x{0},   normal_y{0};
-    float    centroid_x{0}, centroid_y{0};
-    float    vel_x{0},      vel_y{0};
-    float    inv_mass{0};
+    float    depth{0};
+    float    pos_x{0},       pos_y{0};
+    float    normal_x{0},    normal_y{0};
+    float    other_vel_x{0}, other_vel_y{0};
+    float    other_inv_m{0};
     float    _pad{0};
 };
-static_assert(sizeof(ContactAggregate) == 40);
+static_assert(sizeof(ContactPoint) == 40);
 
-static constexpr uint32_t MAX_CONTACTS_PER_BODY = 32;
+static constexpr uint32_t MAX_MANIFOLD_POINTS = 8;
 
 // body_id encoding:
 //   COLLISION_EMPTY  = 0
@@ -75,8 +76,9 @@ struct CollisionPixel {     // 32 bytes
 static_assert(sizeof(CollisionPixel) == 32);
 
 struct LoadedBodyImage {
-    uint32_t              width{}, height{};
+    uint32_t               width{}, height{};
     std::vector<glm::vec4> pixels;
+    std::vector<float>     sdf;   // signed distance field, computed on load
 };
 
 LoadedBodyImage load_body_image(const char* path);
@@ -93,9 +95,10 @@ struct BodyTier {
     AllocatedBuffer pixel_colors;        // glm::vec4[]        capacity * body_pixels
     AllocatedBuffer body_l0;             // PhysicsPixel[]     capacity  (reduced, one per slot)
     AllocatedBuffer active_indices_buf;  // uint32_t[]         capacity
-    AllocatedBuffer contact_entries;     // ContactEntry[]     capacity * body_pixels * 2
-    AllocatedBuffer contact_counters;    // uint32_t[]         capacity  (atomic, reset each frame)
-    AllocatedBuffer contact_agg;         // ContactAggregate[] capacity * MAX_CONTACTS_PER_BODY
+    AllocatedBuffer contact_entries;     // ContactEntry[]   capacity * body_pixels * 2
+    AllocatedBuffer contact_counters;    // uint32_t[]       capacity  (atomic, reset each frame)
+    AllocatedBuffer contact_manifold;    // ContactPoint[]   capacity * MAX_MANIFOLD_POINTS
+    AllocatedBuffer body_sdf;            // float[]          capacity * body_pixels
 
     struct TierPipeline {
         VkPipeline            pipeline{VK_NULL_HANDLE};
@@ -105,15 +108,15 @@ struct BodyTier {
 
     TierPipeline pixel_physics_pl;
     TierPipeline pixel_reduction_pl;
-    TierPipeline contact_reduction_pl;
+    TierPipeline contact_manifold_pl;
     TierPipeline draw_pl;
     TierPipeline integrate_pl;
 
-    VkDescriptorSet physics_desc[2]{};   // rb, physics_pixels, collision_pixels, active_indices, contact_entries, contact_counters
+    VkDescriptorSet physics_desc[2]{};   // rb, physics_pixels, collision_pixels, active_indices, contact_entries, contact_counters, static_sdf
     VkDescriptorSet reduction_desc{};    // physics_pixels → body_l0
-    VkDescriptorSet contact_desc{};      // contact_entries, contact_counters → contact_agg
+    VkDescriptorSet manifold_desc{};     // contact_entries, contact_counters → contact_manifold
     VkDescriptorSet draw_desc[2]{};      // reads rb[i], writes output_screen + collision_pixels
-    VkDescriptorSet integrate_desc[2]{}; // rb[i] → rb[1-i] via body_l0 + contact_agg
+    VkDescriptorSet integrate_desc[2]{}; // rb[i] → rb[1-i] via body_l0 + contact_manifold
 
     DescriptorAllocator desc_allocator;
 
@@ -124,8 +127,9 @@ struct BodyTier {
 struct PhysicsPipeline {
 
     AllocatedImage  output_screen;
-    AllocatedBuffer static_collision;  
-    AllocatedBuffer collision_pixels; 
+    AllocatedBuffer static_collision;
+    AllocatedBuffer collision_pixels;
+    AllocatedBuffer static_sdf;          // float[] PHYSICS_WIDTH × PHYSICS_HEIGHT
 
     struct GapFillPipeline {
         VkPipeline            pipeline{VK_NULL_HANDLE};
@@ -137,7 +141,8 @@ struct PhysicsPipeline {
 
     BodyTier tiers[3];  // 0 = 4×4,  1 = 16×16,  2 = 64×64
 
-    uint32_t frame_parity{0};
+    uint32_t     frame_parity{0};
+    SdfGenerator sdf_gen;
 
     void init(ResiduaEngine* engine, uint32_t initial_capacity);
 
