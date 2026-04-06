@@ -1,4 +1,5 @@
 #include <src/game/game.h>
+#include <stb_image.h>
 
 void Game::SDL_setup() {
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
@@ -20,13 +21,30 @@ void Game::init() {
 
 	engine.init(_windowExtent, _window);
 
-	ball_image = load_body_image("../assets/physics/ball.png");
-	cshape = load_body_image("../assets/physics/cshape.png");
-	star = load_body_image("../assets/physics/star.png");
+	ball_sprite   = load_body_sprite("../assets/physics/ball.png");
+	cshape_sprite = load_body_sprite("../assets/physics/cshape.png");
+	star_sprite   = load_body_sprite("../assets/physics/star.png");
 
-	physics.init(&engine, 256);
-	physics.upload_collision_layer(&engine, "../assets/physics/collision_layer.png");
-	engine.physics = &physics;
+	// Load collision layer: compute SDF for physics, store pixels for rendering
+	{
+		int w, h, ch;
+		stbi_uc* data = stbi_load("../assets/physics/collision_layer.png", &w, &h, &ch, STBI_rgb_alpha);
+		assert(data && "Game::init: failed to load collision layer");
+		const uint32_t n = (uint32_t)(w * h);
+		std::vector<glm::vec4> pixels(n);
+		std::vector<bool> solid(n);
+		for (uint32_t i = 0; i < n; i++) {
+			pixels[i] = { data[i*4+0]/255.f, data[i*4+1]/255.f,
+			               data[i*4+2]/255.f, data[i*4+3]/255.f };
+			solid[i]  = pixels[i].a > 0.5f;
+		}
+		stbi_image_free(data);
+		physics.set_static_layer((uint32_t)w, (uint32_t)h, std::move(solid));
+		engine.body_renderer.set_background((uint32_t)w, (uint32_t)h, pixels);
+	}
+
+	engine.body_renderer.init(&engine);
+	engine.cpu_physics = &physics;
 
 	lastFrame = std::chrono::system_clock::now();
 }
@@ -78,17 +96,17 @@ void Game::run() {
 				mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
-			physics.add_body(&engine, ball_image, 0, spawn_pos);
+			physics.add_body(make_rigidbody(&ball_sprite, spawn_pos));
 			lastSpawn = 0;
 		}
-		else if(input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
+		else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
 			int mx, my;
 			SDL_GetMouseState(&mx, &my);
 			glm::vec2 spawn_pos = {
 				mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
-			physics.add_body(&engine, cshape, 1, spawn_pos);
+			physics.add_body(make_rigidbody(&cshape_sprite, spawn_pos));
 			lastSpawn = 0;
 		}
 		else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 30) {
@@ -98,7 +116,7 @@ void Game::run() {
 				mx * float(PHYSICS_WIDTH) / float(_windowExtent.width),
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
-			physics.add_body(&engine, star, 2, spawn_pos);
+			physics.add_body(make_rigidbody(&star_sprite, spawn_pos));
 			lastSpawn = 0;
 		}
 		if (input.blou(InputManager::InputType::INSPECT)) {
@@ -108,13 +126,13 @@ void Game::run() {
 				mx * float(PHYSICS_WIDTH) / float(_windowExtent.width),
 				my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
 			};
-
-			if (auto hit = physics.body_at(check_pos)) {
-				physics.remove_body(hit->first, hit->second);
-			}
+			int hit = physics.body_at(check_pos);
+			if (hit >= 0) physics.remove_body(hit);
 		}
 
 		lastSpawn++;
+
+		physics.step(delta);
 
 		if (!freeze_rendering) {
 			engine._dt = delta;

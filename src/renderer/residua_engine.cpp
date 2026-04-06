@@ -1,6 +1,6 @@
 ﻿#include <iostream>
 #include "residua_engine.h"
-
+#include "vk_images.h"
 
 #include <VkBootstrap.h>
 
@@ -14,6 +14,96 @@
 #include <array>
 
 constexpr bool bUseValidationLayers = true;
+
+// ─── BodyRenderer ─────────────────────────────────────────────────────────────
+
+void BodyRenderer::init(ResiduaEngine* engine) {
+    output = engine->create_image(
+        VkExtent3D{ PHYSICS_WIDTH, PHYSICS_HEIGHT, 1 },
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+    );
+
+    staging = engine->create_buffer(
+        PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU
+    );
+}
+
+void BodyRenderer::set_background(uint32_t w, uint32_t h,
+                                   const std::vector<glm::vec4>& pixels)
+{
+    background.resize(PHYSICS_WIDTH * PHYSICS_HEIGHT, 0u);
+    const uint32_t copy_w = std::min(w, PHYSICS_WIDTH);
+    const uint32_t copy_h = std::min(h, PHYSICS_HEIGHT);
+    for (uint32_t y = 0; y < copy_h; y++) {
+        for (uint32_t x = 0; x < copy_w; x++) {
+            const glm::vec4& c = pixels[y * w + x];
+            background[y * PHYSICS_WIDTH + x] =
+                (uint32_t(c.r * 255) << 0)  |
+                (uint32_t(c.g * 255) << 8)  |
+                (uint32_t(c.b * 255) << 16) |
+                (uint32_t(c.a * 255) << 24);
+        }
+    }
+}
+
+void BodyRenderer::draw(const Physics& world, VkCommandBuffer cmd) {
+    auto* px = static_cast<uint32_t*>(staging.info.pMappedData);
+
+    // Paint background (static layer) or clear to black
+    if (!background.empty())
+        std::copy(background.begin(), background.end(), px);
+    else
+        std::fill(px, px + PHYSICS_WIDTH * PHYSICS_HEIGHT, 0u);
+
+    // Paint each active rigidbody over the background
+    for (int id : world.active_ids()) {
+        const RigidBody* rb = world.get(id);
+        if (!rb || !rb->sprite) continue;
+
+        const BodySprite& sp = *rb->sprite;
+        const float c = std::cos(rb->rotation), s = std::sin(rb->rotation);
+
+        for (uint32_t i = 0; i < sp.width * sp.height; i++) {
+            const glm::vec4& col = sp.pixels[i];
+            if (col.a < 0.5f) continue;
+
+            const float lx = float(i % sp.width)  - sp.width  * 0.5f + 0.5f;
+            const float ly = float(i / sp.width)   - sp.height * 0.5f + 0.5f;
+            const int   wx = (int)(rb->position.x + c * lx - s * ly);
+            const int   wy = (int)(rb->position.y + s * lx + c * ly);
+
+            if (wx < 0 || wx >= (int)PHYSICS_WIDTH ||
+                wy < 0 || wy >= (int)PHYSICS_HEIGHT) continue;
+
+            px[wy * PHYSICS_WIDTH + wx] =
+                (uint32_t(col.r * 255) << 0)  |
+                (uint32_t(col.g * 255) << 8)  |
+                (uint32_t(col.b * 255) << 16) |
+                (uint32_t(col.a * 255) << 24);
+        }
+    }
+
+    // Upload staging buffer → GPU image
+    vkutil::transition_image(cmd, output.image,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkBufferImageCopy region{
+        .bufferOffset      = 0,
+        .bufferRowLength   = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageOffset       = {},
+        .imageExtent       = { PHYSICS_WIDTH, PHYSICS_HEIGHT, 1 },
+    };
+    vkCmdCopyBufferToImage(cmd, staging.buffer, output.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    vkutil::transition_image(cmd, output.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+}
 
 ResiduaEngine* loadedEngine = nullptr;
 
@@ -55,9 +145,6 @@ void ResiduaEngine::init(
 
 void ResiduaEngine::init_pipelines()
 {
-    // COMPUTE PIPELINES
-    init_background_pipelines();
-
 }
 
 void ResiduaEngine::init_default_data() {
@@ -125,8 +212,8 @@ void ResiduaEngine::cleanup()
 
 void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 {
-	if (physics) {
-		physics->dispatch(cmd, _dt);
+	if (cpu_physics) {
+		body_renderer.draw(*cpu_physics, cmd);
 		return;
 	}
 
@@ -194,11 +281,10 @@ void ResiduaEngine::draw()
 
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	if (physics) {
-		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-		vkutil::copy_image_to_image(cmd, physics->output_screen.image, _swapchainImages[swapchainImageIndex],
+	if (cpu_physics) {
+		// output is already in TRANSFER_SRC_OPTIMAL after body_renderer.draw()
+		vkutil::copy_image_to_image(cmd, body_renderer.output.image, _swapchainImages[swapchainImageIndex],
 			{ PHYSICS_WIDTH, PHYSICS_HEIGHT }, _swapchainExtent);
-		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	} else {
 		vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
@@ -267,8 +353,6 @@ void ResiduaEngine::process_renderer_input(SDL_Event& e) {
 }
 
 void ResiduaEngine::process_player_update(glm::vec2 player_pos) {
-	ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-    selected.data.playerPos = player_pos;
 }
 
 void ResiduaEngine::draw_frame() {
@@ -292,20 +376,6 @@ void ResiduaEngine::draw_frame() {
 	ImGui::Text("draws %i", stats.drawcall_count);
 	ImGui::End();
 
-	if (ImGui::Begin("background")) {
-		ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-
-		ImGui::Text("Selected effect: ", selected.name);
-
-		ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0, backgroundEffects.size() - 1);
-
-		ImGui::InputFloat4("data1", (float*)&selected.data.data1);
-		ImGui::InputFloat4("data2", (float*)&selected.data.data2);
-		ImGui::InputFloat4("data3", (float*)&selected.data.data3);
-		ImGui::InputFloat4("data4", (float*)&selected.data.data4); 
-
-		ImGui::End();
-	}
 
 	ImGui::Render();
 

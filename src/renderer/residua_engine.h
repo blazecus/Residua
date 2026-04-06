@@ -18,9 +18,26 @@
 #include "vk_pipelines.h"
 
 #include "../physics/physics_engine.h"
+#include "../physics/rigidbody.h"
 
 #include <vk_mem_alloc.h>
 #include <chrono>
+
+static constexpr uint32_t PHYSICS_WIDTH  = 480;
+static constexpr uint32_t PHYSICS_HEIGHT = 270;
+
+// CPU-driven renderer for rigidbodies.
+// Each frame: paints body pixels into a CPU buffer, uploads to a GPU image.
+struct BodyRenderer {
+    AllocatedImage  output;   // PHYSICS_WIDTH × PHYSICS_HEIGHT RGBA8, blitted to swapchain
+    AllocatedBuffer staging;  // persistently-mapped CPU buffer, same dimensions
+
+    std::vector<uint32_t> background; // packed RGBA8 static layer, size = W*H (may be empty)
+
+    void init(struct ResiduaEngine* engine);
+    void set_background(uint32_t w, uint32_t h, const std::vector<glm::vec4>& pixels);
+    void draw(const Physics& world, VkCommandBuffer cmd);
+};
 
 struct DeletionQueue {
     std::deque<std::function<void()>> deletors;
@@ -188,7 +205,8 @@ public:
 
     bool resize_requested { false };
 
-    PhysicsPipeline* physics { nullptr };
+    Physics*     cpu_physics { nullptr };
+    BodyRenderer body_renderer;
     float _dt { 0.016f };
     bool freeze_rendering { false };
 

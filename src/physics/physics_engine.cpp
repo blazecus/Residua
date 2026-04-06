@@ -1,899 +1,405 @@
 #include "physics_engine.h"
-#include "../renderer/residua_engine.h"
-#include "../renderer/vk_images.h"
-#include "../renderer/vk_pipelines.h"
-#include "../renderer/vk_initializers.h"
-#include <stb_image.h>
-#include <fmt/core.h>
 #include <algorithm>
 #include <cassert>
-#include <cstring>
-#include <random>
+#include <cmath>
+#include <limits>
+#include <iostream>
+#include <chrono>
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Body management ──────────────────────────────────────────────────────────
 
-LoadedBodyImage load_body_image(const char* path) {
-    int w, h, channels;
-    stbi_uc* data = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
-    assert(data && "load_body_image: failed to open file");
-
-    LoadedBodyImage result;
-    result.width  = (uint32_t)w;
-    result.height = (uint32_t)h;
-    result.pixels.resize(w * h);
-    for (int i = 0; i < w * h; i++) {
-        result.pixels[i] = glm::vec4(
-            data[i * 4 + 0] / 255.f,
-            data[i * 4 + 1] / 255.f,
-            data[i * 4 + 2] / 255.f,
-            data[i * 4 + 3] / 255.f
-        );
+int Physics::add_body(RigidBody body) {
+    if (!_free_ids.empty()) {
+        int id = _free_ids.back();
+        _free_ids.pop_back();
+        _slots[id] = {std::move(body), true};
+        return id;
     }
-    stbi_image_free(data);
-
-    std::vector<float> alpha(result.width * result.height);
-    for (uint32_t i = 0; i < alpha.size(); i++)
-        alpha[i] = result.pixels[i].a;
-    result.sdf = compute_sdf(result.width, result.height, alpha);
-
-    return result;
+    int id = (int)_slots.size();
+    _slots.push_back({std::move(body), true});
+    return id;
 }
 
-static VkPipeline create_compute_pipeline(
-    VkDevice                    device,
-    const char*                 spv_path,
-    VkPipelineLayout            layout,
-    const VkSpecializationInfo* spec = nullptr
-) {
-    VkShaderModule module;
-    if (!vkutil::load_shader_module(spv_path, device, &module)) {
-        fmt::print("create_compute_pipeline: failed to load {}\n", spv_path);
-        return VK_NULL_HANDLE;
-    }
-
-    VkPipelineShaderStageCreateInfo stage {
-        .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module              = module,
-        .pName               = "main",
-        .pSpecializationInfo = spec,
-    };
-    VkComputePipelineCreateInfo info {
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = stage,
-        .layout = layout,
-    };
-
-    VkPipeline pipeline;
-    VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline));
-    vkDestroyShaderModule(device, module, nullptr);
-    return pipeline;
+void Physics::remove_body(int id) {
+    assert(id >= 0 && id < (int)_slots.size() && _slots[id].active);
+    _slots[id].active = false;
+    _free_ids.push_back(id);
 }
 
-static void buffer_barrier(VkCommandBuffer cmd, VkBuffer buffer,
-    VkAccessFlags2 src_access, VkAccessFlags2 dst_access)
+RigidBody* Physics::get(int id) {
+    if (id < 0 || id >= (int)_slots.size() || !_slots[id].active) return nullptr;
+    return &_slots[id].body;
+}
+
+const RigidBody* Physics::get(int id) const {
+    if (id < 0 || id >= (int)_slots.size() || !_slots[id].active) return nullptr;
+    return &_slots[id].body;
+}
+
+void Physics::set_static_layer(uint32_t w, uint32_t h,
+                                std::vector<bool> solid)
 {
-    VkBufferMemoryBarrier2 barrier {
-        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .srcAccessMask = src_access,
-        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = dst_access,
-        .buffer        = buffer,
-        .offset        = 0,
-        .size          = VK_WHOLE_SIZE,
-    };
-    VkDependencyInfo dep {
-        .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep);
+    _static_w     = w;
+    _static_h     = h;
+    _static_solid = std::move(solid);
 }
 
-void PhysicsPipeline::update_tier_descriptors(VkDevice device, uint32_t tier_idx) {
-    BodyTier& t = tiers[tier_idx];
+// ─── Edge query helpers ───────────────────────────────────────────────────────
 
-    const size_t rb_size               = t.capacity * sizeof(RigidBody);
-    const size_t phys_pixels_size      = t.capacity * t.body_pixels * sizeof(PhysicsPixel);
-    const size_t pixel_colors_size     = t.capacity * t.body_pixels * sizeof(glm::vec4);
-    const size_t body_l0_size          = t.capacity * sizeof(PhysicsPixel);
-    const size_t active_idx_size       = t.capacity * sizeof(uint32_t);
-    const size_t collision_size         = PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel);
-    const size_t contact_entries_size   = t.capacity * t.body_pixels * 2 * sizeof(ContactEntry);
-    const size_t contact_counters_size  = t.capacity * sizeof(uint32_t);
-    const size_t contact_manifold_size  = t.capacity * MAX_MANIFOLD_POINTS * sizeof(ContactPoint);
-
-    for (int i = 0; i < 2; i++) {
-        // physics_desc: rb, physics_pixels, collision_pixels, active_indices, contact_entries, contact_counters
-        {
-            DescriptorWriter w;
-            w.write_buffer(0, t.rb[i].buffer,              rb_size,               0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(1, t.physics_pixels.buffer,     phys_pixels_size,      0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(2, collision_pixels.buffer,     collision_size,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(3, t.active_indices_buf.buffer, active_idx_size,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(4, t.contact_entries.buffer,    contact_entries_size,  0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(5, t.contact_counters.buffer,   contact_counters_size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(6, static_sdf.buffer, PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(float), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.update_set(device, t.physics_desc[i]);
-        }
-        // draw_desc: rb, pixel_colors, physics_pixels, output_screen, collision_pixels, active_indices
-        {
-            DescriptorWriter w;
-            w.write_buffer(0, t.rb[i].buffer,              rb_size,           0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(1, t.pixel_colors.buffer,       pixel_colors_size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(2, t.physics_pixels.buffer,     phys_pixels_size,  0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_image (3, output_screen.imageView,     VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-            w.write_buffer(4, collision_pixels.buffer,     collision_size,    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(5, t.active_indices_buf.buffer, active_idx_size,   0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.update_set(device, t.draw_desc[i]);
-        }
-        // integrate_desc: rb src, rb dst, body_l0, active_indices, contact_manifold
-        {
-            DescriptorWriter w;
-            w.write_buffer(0, t.rb[i].buffer,              rb_size,             0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(1, t.rb[1-i].buffer,            rb_size,             0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(2, t.body_l0.buffer,            body_l0_size,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(3, t.active_indices_buf.buffer, active_idx_size,     0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.write_buffer(4, t.contact_manifold.buffer,   contact_manifold_size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-            w.update_set(device, t.integrate_desc[i]);
-        }
-    }
-    // reduction_desc: physics_pixels → body_l0
-    {
-        DescriptorWriter w;
-        w.write_buffer(0, t.physics_pixels.buffer,     phys_pixels_size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_buffer(1, t.body_l0.buffer,            body_l0_size,     0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_buffer(2, t.active_indices_buf.buffer, active_idx_size,  0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.update_set(device, t.reduction_desc);
-    }
-    // manifold_desc: contact_entries, contact_counters → contact_manifold, active_indices
-    {
-        DescriptorWriter w;
-        w.write_buffer(0, t.contact_entries.buffer,    contact_entries_size,    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_buffer(1, t.contact_counters.buffer,   contact_counters_size,   0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_buffer(2, t.contact_manifold.buffer,   contact_manifold_size,   0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_buffer(3, t.active_indices_buf.buffer, active_idx_size,         0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.update_set(device, t.manifold_desc);
-    }
+static float pt_seg_dist(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
+    glm::vec2 ab = b - a;
+    float len2 = glm::dot(ab, ab);
+    if (len2 < 1e-10f) return glm::length(p - a);
+    float t = std::clamp(glm::dot(p - a, ab) / len2, 0.f, 1.f);
+    return glm::length(p - (a + t * ab));
 }
 
-void PhysicsPipeline::grow_tier_buffers(ResiduaEngine* engine, uint32_t tier_idx) {
-    BodyTier& t = tiers[tier_idx];
-    const uint32_t new_capacity = t.capacity * 2;
-    fmt::print("PhysicsPipeline tier {}: growing {} → {} slots\n", tier_idx, t.capacity, new_capacity);
-
-    vkDeviceWaitIdle(engine->_device);
-
-    const size_t new_rb_size               = new_capacity * sizeof(RigidBody);
-    const size_t new_phys_pixels_size      = new_capacity * t.body_pixels * sizeof(PhysicsPixel);
-    const size_t new_pixel_colors_size     = new_capacity * t.body_pixels * sizeof(glm::vec4);
-    const size_t new_body_l0_size          = new_capacity * sizeof(PhysicsPixel);
-    const size_t new_active_idx_size       = new_capacity * sizeof(uint32_t);
-    const size_t new_contact_entries_size   = new_capacity * t.body_pixels * 2 * sizeof(ContactEntry);
-    const size_t new_contact_counters_size  = new_capacity * sizeof(uint32_t);
-    const size_t new_contact_manifold_size  = new_capacity * MAX_MANIFOLD_POINTS * sizeof(ContactPoint);
-
-    AllocatedBuffer new_rb0             = engine->create_buffer(new_rb_size,               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_rb1             = engine->create_buffer(new_rb_size,               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_phys_pixels     = engine->create_buffer(new_phys_pixels_size,      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_pixel_colors    = engine->create_buffer(new_pixel_colors_size,     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_body_l0         = engine->create_buffer(new_body_l0_size,          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_active_idx      = engine->create_buffer(new_active_idx_size,       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    AllocatedBuffer new_contact_entries  = engine->create_buffer(new_contact_entries_size,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    AllocatedBuffer new_contact_counters = engine->create_buffer(new_contact_counters_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    AllocatedBuffer new_contact_manifold = engine->create_buffer(new_contact_manifold_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    AllocatedBuffer new_body_sdf         = engine->create_buffer(new_capacity * t.body_pixels * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-    memcpy(new_rb0.info.pMappedData,          t.rb[0].info.pMappedData,          t.capacity * sizeof(RigidBody));
-    memcpy(new_rb1.info.pMappedData,          t.rb[1].info.pMappedData,          t.capacity * sizeof(RigidBody));
-    memcpy(new_phys_pixels.info.pMappedData,  t.physics_pixels.info.pMappedData, t.capacity * t.body_pixels * sizeof(PhysicsPixel));
-    memcpy(new_pixel_colors.info.pMappedData, t.pixel_colors.info.pMappedData,   t.capacity * t.body_pixels * sizeof(glm::vec4));
-    memcpy(new_body_l0.info.pMappedData,      t.body_l0.info.pMappedData,        t.capacity * sizeof(PhysicsPixel));
-    memcpy(new_active_idx.info.pMappedData,   t.active_slots.data(),             t.active_count * sizeof(uint32_t));
-    memcpy(new_body_sdf.info.pMappedData,     t.body_sdf.info.pMappedData,       t.capacity * t.body_pixels * sizeof(float));
-
-    engine->destroy_buffer(t.rb[0]);
-    engine->destroy_buffer(t.rb[1]);
-    engine->destroy_buffer(t.physics_pixels);
-    engine->destroy_buffer(t.pixel_colors);
-    engine->destroy_buffer(t.body_l0);
-    engine->destroy_buffer(t.active_indices_buf);
-    engine->destroy_buffer(t.contact_entries);
-    engine->destroy_buffer(t.contact_counters);
-    engine->destroy_buffer(t.contact_manifold);
-    engine->destroy_buffer(t.body_sdf);
-
-    t.rb[0]              = new_rb0;
-    t.rb[1]              = new_rb1;
-    t.physics_pixels     = new_phys_pixels;
-    t.pixel_colors       = new_pixel_colors;
-    t.body_l0            = new_body_l0;
-    t.active_indices_buf = new_active_idx;
-    t.contact_entries    = new_contact_entries;
-    t.contact_counters   = new_contact_counters;
-    t.contact_manifold   = new_contact_manifold;
-    t.body_sdf           = new_body_sdf;
-    t.capacity           = new_capacity;
-
-    update_tier_descriptors(engine->_device, tier_idx);
+static const MsEdge* nearest_edge(const std::vector<MsEdge>& edges, glm::vec2 p) {
+    const MsEdge* best = nullptr;
+    float best_d = std::numeric_limits<float>::max();
+    for (const MsEdge& e : edges) {
+        float d = pt_seg_dist(p, e.a, e.b);
+        if (d < best_d) { best_d = d; best = &e; }
+    }
+    return best;
 }
 
-void PhysicsPipeline::init_tier(ResiduaEngine* engine, uint32_t tier_idx, uint32_t initial_capacity) {
-    static constexpr uint32_t dims[3][2] = { {4, 4}, {16, 16}, {64, 64} };
+// ─── Contact detection ────────────────────────────────────────────────────────
 
-    BodyTier& t    = tiers[tier_idx];
-    t.tier_index   = tier_idx;
-    t.body_w       = dims[tier_idx][0];
-    t.body_h       = dims[tier_idx][1];
-    t.body_pixels  = t.body_w * t.body_h;
-    t.capacity     = initial_capacity;
+// Reduce a local list of raw contacts for one body pair to at most 2 representative
+// contacts and append them to _contacts.  Uses the averaged normal and the two
+// extremal points along the contact tangent so stacking stays stable.
+void Physics::reduce_and_emit(std::vector<Contact>& raw, int id_a, int id_b) {
+    if (raw.empty()) return;
 
-    VkDevice device = engine->_device;
+    // Average normal over all raw contacts.
+    glm::vec2 sum_n{0.f};
+    for (const Contact& c : raw) sum_n += c.normal;
+    float nlen = glm::length(sum_n);
+    if (nlen < 1e-6f) return;
+    glm::vec2 n = sum_n / nlen;
 
-    const size_t rb_size               = t.capacity * sizeof(RigidBody);
-    const size_t phys_pixels_size      = t.capacity * t.body_pixels * sizeof(PhysicsPixel);
-    const size_t pixel_colors_size     = t.capacity * t.body_pixels * sizeof(glm::vec4);
-    const size_t body_l0_size          = t.capacity * sizeof(PhysicsPixel);
-    const size_t active_idx_size       = t.capacity * sizeof(uint32_t);
-    const size_t contact_entries_size   = t.capacity * t.body_pixels * 2 * sizeof(ContactEntry);
-    const size_t contact_counters_size  = t.capacity * sizeof(uint32_t);
-    const size_t contact_manifold_size  = t.capacity * MAX_MANIFOLD_POINTS * sizeof(ContactPoint);
-
-    t.rb[0]              = engine->create_buffer(rb_size,                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.rb[1]              = engine->create_buffer(rb_size,                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.physics_pixels     = engine->create_buffer(phys_pixels_size,       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.pixel_colors       = engine->create_buffer(pixel_colors_size,      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.body_l0            = engine->create_buffer(body_l0_size,           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.active_indices_buf = engine->create_buffer(active_idx_size,        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
-    t.contact_entries    = engine->create_buffer(contact_entries_size,   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_GPU_ONLY);
-    t.contact_counters   = engine->create_buffer(contact_counters_size,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    t.contact_manifold   = engine->create_buffer(contact_manifold_size,  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,                                    VMA_MEMORY_USAGE_GPU_ONLY);
-    t.body_sdf           = engine->create_buffer(t.capacity * t.body_pixels * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-    // Spec constants: BODY_W, BODY_H
-    uint32_t spec_data[] = { t.body_w, t.body_h };
-    VkSpecializationMapEntry spec_entries[] = {
-        { 0, 0,                sizeof(uint32_t) },
-        { 1, sizeof(uint32_t), sizeof(uint32_t) },
-    };
-    VkSpecializationInfo spec_info {
-        .mapEntryCount = 2,
-        .pMapEntries   = spec_entries,
-        .dataSize      = sizeof(spec_data),
-        .pData         = spec_data,
-    };
-
-    DescriptorAllocator::PoolSizeRatio pool_ratios[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40.f },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,   4.f },
-    };
-    t.desc_allocator.init_pool(device, 9, pool_ratios);
-
-    // ── pixel_physics ─────────────────────────────────────────────────────
-    {
-        auto& pl = t.pixel_physics_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rb
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // physics_pixels
-        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // collision_pixels
-        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices
-        b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_entries (write)
-        b.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_counters (atomic write)
-        b.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // static_sdf (read)
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // body_count(u32) + gravity(f32) + physics_width(u32) + physics_height(u32) + tier_index(u32) = 20 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 4 + sizeof(float) };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/pixel_physics.comp.spv", pl.layout, &spec_info);
-
-        for (int i = 0; i < 2; i++)
-            t.physics_desc[i] = t.desc_allocator.allocate(device, pl.desc_layout);
+    // Find the two extremal contact points along the tangent.
+    glm::vec2 t{-n.y, n.x};
+    glm::vec2 pA = raw[0].point, pB = raw[0].point;
+    float tA = glm::dot(pA, t), tB = tA;
+    for (const Contact& c : raw) {
+        float proj = glm::dot(c.point, t);
+        if (proj < tA) { tA = proj; pA = c.point; }
+        if (proj > tB) { tB = proj; pB = c.point; }
     }
 
-    // ── pixel_reduction ───────────────────────────────────────────────────
-    {
-        auto& pl = t.pixel_reduction_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // src (physics_pixels)
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // dst (body_l0)
-        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // body_count(u32) = 4 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/pixel_reduction.comp.spv", pl.layout, &spec_info);
-
-        t.reduction_desc = t.desc_allocator.allocate(device, pl.desc_layout);
-    }
-
-    // ── contact_manifold ─────────────────────────────────────────────────
-    {
-        auto& pl = t.contact_manifold_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_entries (read)
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_counters (read)
-        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_manifold (write)
-        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // body_count(u32) = 4 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/contact_manifold.comp.spv", pl.layout, &spec_info);
-
-        t.manifold_desc = t.desc_allocator.allocate(device, pl.desc_layout);
-    }
-
-    // ── rigidbody_draw ────────────────────────────────────────────────────
-    {
-        auto& pl = t.draw_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rb
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // pixel_colors
-        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // physics_pixels (mass check)
-        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_image
-        b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // collision_pixels (write)
-        b.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // body_count(u32) + physics_width(u32) + tier_index(u32) = 12 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 3 };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/rigidbody_draw.comp.spv", pl.layout, &spec_info);
-
-        for (int i = 0; i < 2; i++)
-            t.draw_desc[i] = t.desc_allocator.allocate(device, pl.desc_layout);
-    }
-
-    // ── rigidbody_integrate ───────────────────────────────────────────────
-    {
-        auto& pl = t.integrate_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rb src
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rb dst
-        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // body_l0
-        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices
-        b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_manifold (read)
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // body_count(u32) + dt(f32) + restitution(f32) = 12 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) + sizeof(float) * 2 };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/rigidbody_integrate.comp.spv", pl.layout, &spec_info);
-
-        for (int i = 0; i < 2; i++)
-            t.integrate_desc[i] = t.desc_allocator.allocate(device, pl.desc_layout);
-    }
-
-    update_tier_descriptors(device, tier_idx);
-
-    engine->_mainDeletionQueue.push_function([this, engine, device, tier_idx]() {
-        BodyTier& tier = tiers[tier_idx];
-
-        vkDestroyPipeline(device, tier.pixel_physics_pl.pipeline,     nullptr);
-        vkDestroyPipeline(device, tier.pixel_reduction_pl.pipeline,  nullptr);
-        vkDestroyPipeline(device, tier.contact_manifold_pl.pipeline, nullptr);
-        vkDestroyPipeline(device, tier.draw_pl.pipeline,             nullptr);
-        vkDestroyPipeline(device, tier.integrate_pl.pipeline,        nullptr);
-
-        vkDestroyPipelineLayout(device, tier.pixel_physics_pl.layout,     nullptr);
-        vkDestroyPipelineLayout(device, tier.pixel_reduction_pl.layout,   nullptr);
-        vkDestroyPipelineLayout(device, tier.contact_manifold_pl.layout,  nullptr);
-        vkDestroyPipelineLayout(device, tier.draw_pl.layout,              nullptr);
-        vkDestroyPipelineLayout(device, tier.integrate_pl.layout,         nullptr);
-
-        vkDestroyDescriptorSetLayout(device, tier.pixel_physics_pl.desc_layout,     nullptr);
-        vkDestroyDescriptorSetLayout(device, tier.pixel_reduction_pl.desc_layout,   nullptr);
-        vkDestroyDescriptorSetLayout(device, tier.contact_manifold_pl.desc_layout,  nullptr);
-        vkDestroyDescriptorSetLayout(device, tier.draw_pl.desc_layout,              nullptr);
-        vkDestroyDescriptorSetLayout(device, tier.integrate_pl.desc_layout,         nullptr);
-
-        tier.desc_allocator.destroy_pool(device);
-
-        engine->destroy_buffer(tier.rb[0]);
-        engine->destroy_buffer(tier.rb[1]);
-        engine->destroy_buffer(tier.physics_pixels);
-        engine->destroy_buffer(tier.pixel_colors);
-        engine->destroy_buffer(tier.body_l0);
-        engine->destroy_buffer(tier.active_indices_buf);
-        engine->destroy_buffer(tier.contact_entries);
-        engine->destroy_buffer(tier.contact_counters);
-        engine->destroy_buffer(tier.contact_manifold);
-        engine->destroy_buffer(tier.body_sdf);
-    });
-}
-
-void PhysicsPipeline::init(ResiduaEngine* engine, uint32_t initial_capacity) {
-    VkDevice device = engine->_device;
-
-    VkExtent3D screen_extent { PHYSICS_WIDTH, PHYSICS_HEIGHT, 1 };
-    output_screen = engine->create_image(screen_extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-
-    engine->immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, output_screen.image,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-    });
-
-    const size_t collision_size = PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel);
-    static_collision = engine->create_buffer(collision_size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    collision_pixels = engine->create_buffer(collision_size,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    static_sdf = engine->create_buffer(PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(float),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-    // ── gap_fill ──────────────────────────────────────────────────────────
-    {
-        DescriptorAllocator::PoolSizeRatio pool_ratios[] = {
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2.f },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  2.f },
-        };
-        gap_fill_allocator.init_pool(device, 2, pool_ratios);
-
-        auto& pl = gap_fill_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_image
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // collision_pixels
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        // width(u32) + height(u32) = 8 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 2 };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = create_compute_pipeline(device, "../shaders/gap_fill.comp.spv", pl.layout, nullptr);
-
-        gap_fill_desc = gap_fill_allocator.allocate(device, pl.desc_layout);
-        DescriptorWriter w;
-        w.write_image (0, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        w.write_buffer(1, collision_pixels.buffer, collision_size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.update_set(device, gap_fill_desc);
-    }
-
-    // ── Initialize all three tiers ────────────────────────────────────────
-    init_tier(engine, 0, initial_capacity); // 4×4
-    init_tier(engine, 1, initial_capacity); // 16×16
-    init_tier(engine, 2, initial_capacity); // 64×64
-
-    engine->_mainDeletionQueue.push_function([this, engine, device]() {
-        vkDestroyPipeline(device, gap_fill_pl.pipeline, nullptr);
-        vkDestroyPipelineLayout(device, gap_fill_pl.layout, nullptr);
-        vkDestroyDescriptorSetLayout(device, gap_fill_pl.desc_layout, nullptr);
-        gap_fill_allocator.destroy_pool(device);
-
-        engine->destroy_buffer(static_collision);
-        engine->destroy_buffer(collision_pixels);
-        engine->destroy_buffer(static_sdf);
-        engine->destroy_image(output_screen);
-    });
-}
-
-void PhysicsPipeline::upload_collision_layer(ResiduaEngine* engine, const char* path) {
-    int w, h, channels;
-    stbi_uc* data = stbi_load(path, &w, &h, &channels, STBI_grey);
-    assert(data && "upload_collision_layer: failed to open file");
-    assert(w == (int)PHYSICS_WIDTH && h == (int)PHYSICS_HEIGHT
-        && "upload_collision_layer: image must be PHYSICS_WIDTH × PHYSICS_HEIGHT");
-
-    const uint32_t pixel_count  = PHYSICS_WIDTH * PHYSICS_HEIGHT;
-    const size_t   staging_size = pixel_count * sizeof(CollisionPixel);
-
-    AllocatedBuffer staging = engine->create_buffer(staging_size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-    auto* out = reinterpret_cast<CollisionPixel*>(staging.info.pMappedData);
-    for (uint32_t i = 0; i < pixel_count; i++)
-        out[i] = { data[i] > 0 ? 0xFFFFFFFFu : 0u, 0u };
-
-    {
-        SdfJob job;
-        job.width  = PHYSICS_WIDTH;
-        job.height = PHYSICS_HEIGHT;
-        job.alpha.resize(pixel_count);
-        for (uint32_t i = 0; i < pixel_count; i++)
-            job.alpha[i] = data[i] > 0 ? 1.0f : 0.0f;
-        sdf_gen.submit(std::move(job));
-    }
-
-    stbi_image_free(data);
-
-    engine->immediate_submit([&](VkCommandBuffer cmd) {
-        VkBufferCopy region { 0, 0, staging_size };
-        vkCmdCopyBuffer(cmd, staging.buffer, static_collision.buffer, 1, &region);
-    });
-
-    engine->destroy_buffer(staging);
-}
-
-uint32_t PhysicsPipeline::add_body(
-    ResiduaEngine*         engine,
-    const LoadedBodyImage& img,
-    uint32_t               tier_idx,
-    glm::vec2              position,
-    float                  rotation
-) {
-    assert(tier_idx < 3 && "add_body: tier_idx out of range");
-    BodyTier& t = tiers[tier_idx];
-    assert(img.width == t.body_w && img.height == t.body_h
-        && "add_body: image dimensions don't match tier");
-
-    uint32_t slot;
-    if (!t.free_list.empty()) {
-        slot = t.free_list.back();
-        t.free_list.pop_back();
+    // Emit two contacts if they're spatially distinct, otherwise one centroid.
+    if (tB - tA > 1.5f) {
+        _contacts.push_back({id_a, id_b, pA, n, 1.f});
+        _contacts.push_back({id_a, id_b, pB, n, 1.f});
     } else {
-        if (t.next_slot >= t.capacity)
-            grow_tier_buffers(engine, tier_idx);
-        slot = t.next_slot++;
+        _contacts.push_back({id_a, id_b, (pA + pB) * 0.5f, n, 1.f});
     }
+}
 
-    static std::mt19937 rng{ std::random_device{}() };
-    static std::uniform_real_distribution<float> hue_dist(0.f, 1.f);
+// For each solid pixel of body_a that overlaps the static layer, collect a raw
+// contact, then reduce the whole set to at most 2 representative contacts.
+void Physics::detect_body_vs_static(int id_a) {
+    const RigidBody& a = _slots[id_a].body;
+    if (!a.sprite || _static_solid.empty()) return;
 
-    float h = hue_dist(rng);
-    float s = 0.85f, v = 0.95f;
-    float c = v * s, x = c * (1.f - std::abs(std::fmod(h * 6.f, 2.f) - 1.f));
-    float m = v - c;
-    glm::vec3 rgb;
-    int hi = int(h * 6.f);
-    switch (hi % 6) {
-        case 0: rgb = { c, x, 0 }; break;
-        case 1: rgb = { x, c, 0 }; break;
-        case 2: rgb = { 0, c, x }; break;
-        case 3: rgb = { 0, x, c }; break;
-        case 4: rgb = { x, 0, c }; break;
-        default: rgb = { c, 0, x }; break;
+    const float c  = std::cos(a.rotation), s = std::sin(a.rotation);
+    const float hw = a.sprite->width  * 0.5f;
+    const float hh = a.sprite->height * 0.5f;
+
+    for(auto& edge : a.sprite->edges){
+        float lx = edge.a.x - hw, ly = edge.a.y - hh;
+        glm::vec2 wp = a.position + glm::vec2(c*lx - s*ly, s*lx + c*ly);
+        if (wp.y > 150){
+            _contacts.push_back({id_a, -1, wp, glm::vec2(0, -1), 1.0f});
+            return;
+        }
     }
-    rgb += m;
+    return;
 
-    auto* colors = reinterpret_cast<glm::vec4*>(t.pixel_colors.info.pMappedData);
-    // memcpy(colors + slot * BODY_PIXELS, img.pixels, BODY_PIXELS * sizeof(glm::vec4));
-    glm::vec4* dst = colors + slot * t.body_pixels;
-    for (uint32_t i = 0; i < t.body_pixels; i++)
-        dst[i] = glm::vec4(rgb * glm::vec3(img.pixels[i]), img.pixels[i].a);
-
-    auto* phys = reinterpret_cast<PhysicsPixel*>(t.physics_pixels.info.pMappedData);
-    for (uint32_t i = 0; i < t.body_pixels; i++)
-        phys[slot * t.body_pixels + i].total_mass = img.pixels[i].a;
-
-    float total_mass = 0.f, I_com = 0.f;
-    for (uint32_t i = 0; i < t.body_pixels; i++) {
-        float m  = img.pixels[i].a;
-        float lx = float(i % t.body_w) - t.body_w * 0.5f + 0.5f;
-        float ly = float(i / t.body_w) - t.body_h * 0.5f + 0.5f;
-        total_mass += m;
-        I_com      += m * (lx * lx + ly * ly);
-    }
-
-    if (!img.sdf.empty()) {
-        auto* sdf_dst = reinterpret_cast<float*>(t.body_sdf.info.pMappedData) + slot * t.body_pixels;
-        memcpy(sdf_dst, img.sdf.data(), t.body_pixels * sizeof(float));
-    }
-
-    RigidBody body {
-        .position         = position,
-        .rotation         = rotation,
-        .total_mass       = total_mass,
-        .velocity         = {0.f, 0.f},
-        .angular_velocity = 0.f,
-        .I_com            = I_com,
-        .pixel_index      = slot * t.body_pixels,
+    auto solid_f = [&](int x, int y) -> float {
+        if (x < 0 || x >= (int)_static_w || y < 0 || y >= (int)_static_h) return 0.f;
+        return _static_solid[y * _static_w + x] ? 1.f : 0.f;
     };
 
-    for (int i = 0; i < 2; i++) {
-        auto* bodies = reinterpret_cast<RigidBody*>(t.rb[i].info.pMappedData);
-        bodies[slot] = body;
+    std::vector<Contact> raw;
+    for (uint32_t pi = 0; pi < a.sprite->width * a.sprite->height; pi++) {
+        if (a.sprite->pixels[pi].a < 0.5f) continue;
+
+        float lx = float(pi % a.sprite->width)  + 0.5f - hw;
+        float ly = float(pi / a.sprite->width)   + 0.5f - hh;
+        glm::vec2 wp = a.position + glm::vec2(c*lx - s*ly, s*lx + c*ly);
+
+        int px = (int)wp.x, py = (int)wp.y;
+        if (px < 0 || px >= (int)_static_w || py < 0 || py >= (int)_static_h) continue;
+        if (!_static_solid[py * _static_w + px]) continue;
+
+        glm::vec2 grad{ solid_f(px+1,py) - solid_f(px-1,py),
+                        solid_f(px,py+1) - solid_f(px,py-1) };
+        float len = glm::length(grad);
+        glm::vec2 normal = len > 1e-6f ? -grad / len : glm::vec2{0.f, -1.f};
+        raw.push_back({id_a, -1, wp, normal, 1.f});
     }
 
-    t.active_slots.push_back(slot);
-    t.active_count++;
-
-    auto* indices = reinterpret_cast<uint32_t*>(t.active_indices_buf.info.pMappedData);
-    indices[t.active_count - 1] = slot;
-
-    return slot;
+    reduce_and_emit(raw, id_a, -1);
 }
 
-void PhysicsPipeline::remove_body(uint32_t tier_idx, uint32_t slot) {
-    assert(tier_idx < 3 && "remove_body: tier_idx out of range");
-    BodyTier& t = tiers[tier_idx];
+// Check each marching-squares contour vertex of a against b and vice versa.
+// Collects all raw contacts then reduces to at most 2 representative points.
+void Physics::detect_body_vs_body(int id_a, int id_b) {
+    const RigidBody& a = _slots[id_a].body;
+    const RigidBody& b = _slots[id_b].body;
+    if (!a.sprite || !b.sprite) return;
+    if (a.sprite->edges.empty() && b.sprite->edges.empty()) return;
 
-    auto it = std::find(t.active_slots.begin(), t.active_slots.end(), slot);
-    assert(it != t.active_slots.end() && "remove_body: slot not active");
+    const float ca  = std::cos(a.rotation),  sa  = std::sin(a.rotation);
+    const float cb  = std::cos(b.rotation),  sb  = std::sin(b.rotation);
+    const float cbi = std::cos(-b.rotation), sbi = std::sin(-b.rotation);
+    const float cai = std::cos(-a.rotation), sai = std::sin(-a.rotation);
 
-    uint32_t pos = (uint32_t)(it - t.active_slots.begin());
-    t.active_slots[pos] = t.active_slots.back();
-    t.active_slots.pop_back();
-    t.active_count--;
+    const float ahw = a.sprite->width  * 0.5f, ahh = a.sprite->height * 0.5f;
+    const float bhw = b.sprite->width  * 0.5f, bhh = b.sprite->height * 0.5f;
+    const uint32_t aW = a.sprite->width, aH = a.sprite->height;
+    const uint32_t bW = b.sprite->width, bH = b.sprite->height;
 
-    auto* indices = reinterpret_cast<uint32_t*>(t.active_indices_buf.info.pMappedData);
-    if (pos < t.active_count)
-        indices[pos] = t.active_slots[pos];
+    std::vector<Contact> raw;
 
-    t.free_list.push_back(slot);
+    // ── a's contour vertices inside b ────────────────────────────────────────
+    for (const MsEdge& edge : a.sprite->edges) {
+        for (int vi = 0; vi < 2; vi++) {
+            const glm::vec2& lp = vi == 0 ? edge.a : edge.b;
+            float lx = lp.x - ahw, ly = lp.y - ahh;
+            glm::vec2 wp = a.position + glm::vec2(ca*lx - sa*ly, sa*lx + ca*ly);
+
+            glm::vec2 rel = wp - b.position;
+            float bx = cbi * rel.x - sbi * rel.y + bhw;
+            float by = sbi * rel.x + cbi * rel.y + bhh;
+            int ibx = (int)bx, iby = (int)by;
+            if (ibx < 0 || ibx >= (int)bW || iby < 0 || iby >= (int)bH) continue;
+            if (b.sprite->pixels[iby * bW + ibx].a < 0.5f) continue;
+
+            const MsEdge* ne = nearest_edge(b.sprite->edges, {bx, by});
+            if (!ne) continue;
+            float depth = pt_seg_dist({bx, by}, ne->a, ne->b);
+            glm::vec2 wn = glm::vec2(cb * ne->normal.x - sb * ne->normal.y,
+                                     sb * ne->normal.x + cb * ne->normal.y);
+            raw.push_back({id_a, id_b, wp, wn, depth});
+        }
+    }
+
+    // ── b's contour vertices inside a ────────────────────────────────────────
+    for (const MsEdge& edge : b.sprite->edges) {
+        for (int vi = 0; vi < 2; vi++) {
+            const glm::vec2& lp = vi == 0 ? edge.a : edge.b;
+            float lx = lp.x - bhw, ly = lp.y - bhh;
+            glm::vec2 wp = b.position + glm::vec2(cb*lx - sb*ly, sb*lx + cb*ly);
+
+            glm::vec2 rel = wp - a.position;
+            float ax = cai * rel.x - sai * rel.y + ahw;
+            float ay = sai * rel.x + cai * rel.y + ahh;
+            int iax = (int)ax, iay = (int)ay;
+            if (iax < 0 || iax >= (int)aW || iay < 0 || iay >= (int)aH) continue;
+            if (a.sprite->pixels[iay * aW + iax].a < 0.5f) continue;
+
+            const MsEdge* ne = nearest_edge(a.sprite->edges, {ax, ay});
+            if (!ne) continue;
+            float depth = pt_seg_dist({ax, ay}, ne->a, ne->b);
+            glm::vec2 wn = -glm::vec2(ca * ne->normal.x - sa * ne->normal.y,
+                                       sa * ne->normal.x + ca * ne->normal.y);
+            raw.push_back({id_a, id_b, wp, wn, depth});
+        }
+    }
+
+    reduce_and_emit(raw, id_a, id_b);
 }
 
-std::optional<std::pair<uint32_t, uint32_t>> PhysicsPipeline::body_at(glm::vec2 world_pos) const {
-    for (uint32_t ti = 0; ti < 3; ti++) {
-        const BodyTier& t = tiers[ti];
-        if (t.active_count == 0) continue;
+void Physics::detect_contacts() {
+    _contacts.clear();
 
-        auto* bodies = reinterpret_cast<const RigidBody*>(t.rb[frame_parity].info.pMappedData);
-        auto* phys   = reinterpret_cast<const PhysicsPixel*>(t.physics_pixels.info.pMappedData);
+    for (int id : _active_ids)
+        detect_body_vs_static(id);
 
-        for (uint32_t slot : t.active_slots) {
-            const RigidBody& b = bodies[slot];
-            float c = cosf(-b.rotation), s = sinf(-b.rotation);
-            glm::vec2 d     = world_pos - b.position;
-            glm::vec2 local = { c*d.x - s*d.y, s*d.x + c*d.y };
-            local += glm::vec2(t.body_w, t.body_h) * 0.5f - 0.5f;
-            int lx = (int)floorf(local.x), ly = (int)floorf(local.y);
-            if (lx < 0 || ly < 0 || lx >= (int)t.body_w || ly >= (int)t.body_h) continue;
-            if (phys[slot * t.body_pixels + ly * t.body_w + lx].total_mass > 0.f)
-                return std::make_pair(ti, slot);
-        }
-    }
-    return std::nullopt;
+    std::vector<std::pair<int,int>> pairs;
+    _bvh.query_pairs(pairs);
+    for (auto [pa, pb] : pairs)
+        detect_body_vs_body(_active_ids[pa], _active_ids[pb]);
 }
 
-void PhysicsPipeline::dispatch(VkCommandBuffer cmd, float dt) {
-    // Upload static SDF if the background job completed.
-    // Safe here because vkWaitForFences was called before this point.
-    sdf_gen.poll([this](SdfResult&& result) {
-        memcpy(static_sdf.info.pMappedData, result.sdf.data(),
-               result.sdf.size() * sizeof(float));
-    });
+// ─── Broadphase ───────────────────────────────────────────────────────────────
 
-    bool any_active = false;
-    for (uint32_t ti = 0; ti < 3; ti++)
-        if (tiers[ti].active_count > 0) { any_active = true; break; }
-    if (!any_active) return;
+void Physics::build_broadphase() {
+    _active_ids.clear();
+    std::vector<AABB> aabbs;
 
-    const uint32_t p             = frame_parity;
-    const size_t   collision_size = PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel);
-
-    // 0. Clear output_screen to black
-    VkClearColorValue clear_color { .float32 = { 0.f, 0.f, 0.f, 0.f } };
-    VkImageSubresourceRange clear_range {
-        .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel   = 0,
-        .levelCount     = 1,
-        .baseArrayLayer = 0,
-        .layerCount     = 1,
-    };
-    vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL, &clear_color, 1, &clear_range);
-
-    {
-        VkImageMemoryBarrier2 img_barrier {
-            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask     = VK_PIPELINE_STAGE_2_CLEAR_BIT,
-            .srcAccessMask    = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .image            = output_screen.image,
-            .subresourceRange = clear_range,
-        };
-        VkDependencyInfo dep {
-            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .imageMemoryBarrierCount = 1,
-            .pImageMemoryBarriers    = &img_barrier,
-        };
-        vkCmdPipelineBarrier2(cmd, &dep);
+    for (int i = 0; i < (int)_slots.size(); i++) {
+        if (!_slots[i].active) continue;
+        _slots[i].body.update_aabb();
+        aabbs.push_back(_slots[i].body.aabb);
+        _active_ids.push_back(i);
     }
 
-    // 1. Copy static_collision → collision_pixels
-    {
-        VkBufferCopy region { 0, 0, collision_size };
-        vkCmdCopyBuffer(cmd, static_collision.buffer, collision_pixels.buffer, 1, &region);
-    }
-    {
-        VkBufferMemoryBarrier2 barrier {
-            .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            .buffer        = collision_pixels.buffer,
-            .offset        = 0,
-            .size          = VK_WHOLE_SIZE,
-        };
-        VkDependencyInfo bdep {
-            .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers    = &barrier,
-        };
-        vkCmdPipelineBarrier2(cmd, &bdep);
-    }
+    _bvh.build(aabbs);
+}
 
-    // 2. Draw all tiers into output_screen + collision_pixels
-    for (uint32_t ti = 0; ti < 3; ti++) {
-        BodyTier& t = tiers[ti];
-        if (t.active_count == 0) continue;
+// ─── Sequential Impulse Solver ────────────────────────────────────────────────
 
-        struct { uint32_t body_count; uint32_t physics_width; uint32_t tier_index; }
-            pc { t.active_count, PHYSICS_WIDTH, ti };
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.draw_pl.pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            t.draw_pl.layout, 0, 1, &t.draw_desc[p], 0, nullptr);
-        vkCmdPushConstants(cmd, t.draw_pl.layout,
-            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, t.active_count, 1, 1);
-    }
+static float     cross2d(glm::vec2 a, glm::vec2 b) { return a.x * b.y - a.y * b.x; }
+static glm::vec2 perp(glm::vec2 v)                 { return {-v.y, v.x}; }
 
-    {
-        VkImageMemoryBarrier2 img_bar {
-            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask    = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .image            = output_screen.image,
-            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
-        };
-        VkBufferMemoryBarrier2 buf_bar {
-            .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            .buffer        = collision_pixels.buffer,
-            .offset        = 0,
-            .size          = VK_WHOLE_SIZE,
-        };
-        VkDependencyInfo dep2 {
-            .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers    = &buf_bar,
-            .imageMemoryBarrierCount  = 1,
-            .pImageMemoryBarriers     = &img_bar,
-        };
-        vkCmdPipelineBarrier2(cmd, &dep2);
-    }
+void Physics::solve(float dt) {
+    if (_contacts.empty()) return;
 
-    // 2b. gap_fill
-    {
-        struct { uint32_t width; uint32_t height; } pc { PHYSICS_WIDTH, PHYSICS_HEIGHT };
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gap_fill_pl.pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            gap_fill_pl.layout, 0, 1, &gap_fill_desc, 0, nullptr);
-        vkCmdPushConstants(cmd, gap_fill_pl.layout,
-            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
-    }
+    constexpr float restitution = 0.4f;
+    constexpr float mu          = 0.4f;
 
-    buffer_barrier(cmd, collision_pixels.buffer,
-        VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    for (int iter = 0; iter < solver_iterations; iter++) {
+        for (Contact& ct : _contacts) {
+            RigidBody* a = get(ct.body_a);
+            RigidBody* b = ct.body_b >= 0 ? get(ct.body_b) : nullptr;
+            if (!a) continue;
 
-    // 3–6. Per-tier: clear counters → pixel_physics → pixel_reduction + contact_manifold → integrate
-    for (uint32_t ti = 0; ti < 3; ti++) {
-        BodyTier& t = tiers[ti];
-        if (t.active_count == 0) continue;
+            const glm::vec2 n   = ct.normal;
+            const glm::vec2 r_a = ct.point - a->position;
+            const glm::vec2 r_b = b ? ct.point - b->position : glm::vec2{0.f};
 
-        // Clear contact_counters to 0 before pixel_physics writes to them
-        vkCmdFillBuffer(cmd, t.contact_counters.buffer, 0, VK_WHOLE_SIZE, 0u);
-        {
-            VkBufferMemoryBarrier2 fill_bar {
-                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                .buffer        = t.contact_counters.buffer,
-                .offset        = 0, .size = VK_WHOLE_SIZE,
-            };
-            VkDependencyInfo dep { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &fill_bar };
-            vkCmdPipelineBarrier2(cmd, &dep);
-        }
+            // ── Normal impulse ────────────────────────────────────────────────
+            glm::vec2 va = a->velocity + a->angular_velocity * perp(r_a);
+            glm::vec2 vb = b ? b->velocity + b->angular_velocity * perp(r_b) : glm::vec2{0.f};
+            float v_n = glm::dot(va - vb, n);
 
-        // pixel_physics — writes physics_pixels + contact_entries + contact_counters
-        {
-            struct { uint32_t body_count; float gravity; uint32_t phys_w; uint32_t phys_h; uint32_t tier_index; }
-                pc { t.active_count, 100.0f, PHYSICS_WIDTH, PHYSICS_HEIGHT, ti };
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pixel_physics_pl.pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                t.pixel_physics_pl.layout, 0, 1, &t.physics_desc[p], 0, nullptr);
-            vkCmdPushConstants(cmd, t.pixel_physics_pl.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, t.active_count, 1, 1);
-        }
+            float rna      = cross2d(r_a, n);
+            float rnb      = b ? cross2d(r_b, n) : 0.f;
+            float eff_mass = a->inv_mass + rna * rna * a->inv_I
+                           + (b ? b->inv_mass + rnb * rnb * b->inv_I : 0.f);
+            if (eff_mass < 1e-10f) continue;
 
-        // Barrier covering all pixel_physics outputs
-        buffer_barrier(cmd, t.physics_pixels.buffer,
-            VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-        buffer_barrier(cmd, t.contact_entries.buffer,
-            VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-        buffer_barrier(cmd, t.contact_counters.buffer,
-            VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+            // Velocity-only impulse — position correction is a separate pass.
+            float lambda = -(v_n * (1.f + restitution)) / eff_mass;
 
-        // pixel_reduction — physics_pixels → body_l0
-        {
-            struct { uint32_t body_count; } pc { t.active_count };
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pixel_reduction_pl.pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                t.pixel_reduction_pl.layout, 0, 1, &t.reduction_desc, 0, nullptr);
-            vkCmdPushConstants(cmd, t.pixel_reduction_pl.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, t.active_count, 1, 1);
-        }
+            float old_ln = ct.lambda_n;
+            ct.lambda_n  = std::max(old_ln + lambda, 0.f);
+            lambda       = ct.lambda_n - old_ln;
 
-        // contact_manifold — contact_entries → contact_manifold (2 extreme points per unique body)
-        {
-            struct { uint32_t body_count; } pc { t.active_count };
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.contact_manifold_pl.pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                t.contact_manifold_pl.layout, 0, 1, &t.manifold_desc, 0, nullptr);
-            vkCmdPushConstants(cmd, t.contact_manifold_pl.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, t.active_count, 1, 1);
-        }
+            glm::vec2 imp = lambda * n;
+            a->velocity         += imp * a->inv_mass;
+            a->angular_velocity += cross2d(r_a, imp) * a->inv_I;
+            if (b) {
+                b->velocity         -= imp * b->inv_mass;
+                b->angular_velocity -= cross2d(r_b, imp) * b->inv_I;
+            }
 
-        // Wait for both reductions before integrate
-        buffer_barrier(cmd, t.body_l0.buffer,
-            VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-        buffer_barrier(cmd, t.contact_manifold.buffer,
-            VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+            // ── Friction impulse ──────────────────────────────────────────────
+            const glm::vec2 t = perp(n);
+            va = a->velocity + a->angular_velocity * perp(r_a);
+            vb = b ? b->velocity + b->angular_velocity * perp(r_b) : glm::vec2{0.f};
+            float v_t = glm::dot(va - vb, t);
 
-        // integrate — applies gravity + per-contact impulses
-        {
-            struct { uint32_t body_count; float dt; float restitution; }
-                pc { t.active_count, dt, 0.4f };
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.integrate_pl.pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                t.integrate_pl.layout, 0, 1, &t.integrate_desc[p], 0, nullptr);
-            vkCmdPushConstants(cmd, t.integrate_pl.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, (t.active_count + 63) / 64, 1, 1);
+            float rta        = cross2d(r_a, t);
+            float rtb        = b ? cross2d(r_b, t) : 0.f;
+            float eff_mass_t = a->inv_mass + rta * rta * a->inv_I
+                             + (b ? b->inv_mass + rtb * rtb * b->inv_I : 0.f);
+            if (eff_mass_t < 1e-10f) continue;
+
+            float max_fric = mu * ct.lambda_n;
+            float lt       = -v_t / eff_mass_t;
+            float old_lt   = ct.lambda_t;
+            ct.lambda_t    = std::clamp(old_lt + lt, -max_fric, max_fric);
+            lt             = ct.lambda_t - old_lt;
+
+            glm::vec2 fimp = lt * t;
+            a->velocity         += fimp * a->inv_mass;
+            a->angular_velocity += cross2d(r_a, fimp) * a->inv_I;
+            if (b) {
+                b->velocity         -= fimp * b->inv_mass;
+                b->angular_velocity -= cross2d(r_b, fimp) * b->inv_I;
+            }
         }
     }
+}
 
-    frame_parity ^= 1;
+// ─── Position correction ──────────────────────────────────────────────────────
+// Directly shifts body positions to resolve penetration.
+// Runs after the velocity solve so it doesn't interact with lambda clamping.
+
+void Physics::correct_positions() {
+    constexpr float beta = 0.6f;  // fraction of penetration corrected per step
+    constexpr float slop = 0.1f;  // pixels of allowed penetration before correcting
+
+    for (const Contact& ct : _contacts) {
+        RigidBody* a = get(ct.body_a);
+        RigidBody* b = ct.body_b >= 0 ? get(ct.body_b) : nullptr;
+        if (!a) continue;
+
+        float pen = std::max(ct.depth - slop, 0.f);
+        if (pen <= 0.f) continue;
+
+        float inv_sum = a->inv_mass + (b ? b->inv_mass : 0.f);
+        if (inv_sum < 1e-10f) continue;
+
+        // Each body shifts proportional to its inverse mass share.
+        glm::vec2 correction = (beta * pen / inv_sum) * ct.normal;
+        a->position += a->inv_mass * correction;
+        if (b) b->position -= b->inv_mass * correction;
+    }
+}
+
+void Physics::integrate_velocities(float dt) {
+    for (auto& slot : _slots) {
+        if (!slot.active || slot.body.inv_mass == 0.f) continue;
+        slot.body.velocity += gravity * dt;
+    }
+}
+
+void Physics::integrate_positions(float dt) {
+    for (auto& slot : _slots) {
+        if (!slot.active || slot.body.inv_mass == 0.f) continue;
+        slot.body.position          += slot.body.velocity         * dt;
+        slot.body.rotation          += slot.body.angular_velocity * dt;
+        slot.body.update_aabb();
+    }
+}
+
+int Physics::body_at(glm::vec2 p) const {
+    for (int i = 0; i < (int)_slots.size(); i++) {
+        if (!_slots[i].active) continue;
+        const RigidBody& rb = _slots[i].body;
+        if (!rb.sprite) continue;
+        glm::vec2 rel = p - rb.position;
+        float c = std::cos(-rb.rotation), s = std::sin(-rb.rotation);
+        int lx = (int)(c * rel.x - s * rel.y + rb.sprite->width  * 0.5f);
+        int ly = (int)(s * rel.x + c * rel.y + rb.sprite->height * 0.5f);
+        if (lx < 0 || lx >= (int)rb.sprite->width ||
+            ly < 0 || ly >= (int)rb.sprite->height) continue;
+        if (rb.sprite->pixels[ly * rb.sprite->width + lx].a > 0.5f) return i;
+    }
+    return -1;
+}
+
+void Physics::step(float dt) {
+    using clock = std::chrono::high_resolution_clock;
+    using us    = std::chrono::duration<float, std::micro>;
+
+    auto t0 = clock::now();
+    integrate_velocities(dt);
+    auto t1 = clock::now();
+    build_broadphase();
+    auto t2 = clock::now();
+    detect_contacts();
+    auto t3 = clock::now();
+    solve(dt);
+    auto t4 = clock::now();
+    correct_positions();
+    auto t5 = clock::now();
+    integrate_positions(dt);
+    auto t6 = clock::now();
+
+    std::cout << std::fixed
+        << "integrate_vel="    << us(t1-t0).count() << "us  "
+        << "broadphase="       << us(t2-t1).count() << "us  "
+        << "detect_contacts="  << us(t3-t2).count() << "us  "
+        << "solve="            << us(t4-t3).count() << "us  "
+        << "correct_pos="      << us(t5-t4).count() << "us  "
+        << "integrate_pos="    << us(t6-t5).count() << "us  "
+        << "total="            << us(t6-t0).count() << "us\n";
 }

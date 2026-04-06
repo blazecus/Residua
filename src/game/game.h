@@ -14,7 +14,7 @@ public:
 	SDL_Cursor *cursor; 
 
 	ResiduaEngine engine;
-	PhysicsPipeline physics;
+	Physics physics;
 
 	bool freeze_rendering{ false };
 	bool fpsLimit = true;
@@ -31,9 +31,9 @@ public:
 
 	Client client;
 
-	LoadedBodyImage ball_image;  // 4×4 (tier 0)
-	LoadedBodyImage cshape;
-	LoadedBodyImage star;
+	BodySprite ball_sprite;
+	BodySprite cshape_sprite;
+	BodySprite star_sprite;
 
 	void SDL_setup();
 
