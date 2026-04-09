@@ -1,0 +1,76 @@
+#version 460
+
+// Inline from lbvh_types.glsl — keep in sync with BVHNode
+struct BVHNode {
+    vec2 aabb_min;
+    vec2 aabb_max;
+    int  left;
+    int  right;
+    int  parent;
+    int  object_id;
+};
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PC {
+    uint n;          // body count
+    uint screen_w;
+    uint screen_h;
+};
+
+layout(set = 0, binding = 0) readonly buffer NodeBuf { BVHNode nodes[]; };
+layout(set = 0, binding = 1, rgba16f) uniform image2D output_screen;
+
+vec3 hue_rgb(float h) {
+    float r = abs(fract(h) * 6.0 - 3.0) - 1.0;
+    float g = 2.0 - abs(fract(h) * 6.0 - 2.0);
+    float b = 2.0 - abs(fract(h) * 6.0 - 4.0);
+    return clamp(vec3(r, g, b), 0.0, 1.0);
+}
+
+// Draw a 1-pixel border around an AABB if pt is on the edge.
+bool on_border(vec2 pt, vec2 mn, vec2 mx) {
+    bool inside = pt.x >= mn.x && pt.y >= mn.y && pt.x < mx.x && pt.y < mx.y;
+    bool inner  = pt.x >= mn.x+1.0 && pt.y >= mn.y+1.0 && pt.x < mx.x-1.0 && pt.y < mx.y-1.0;
+    return inside && !inner;
+}
+
+void main() {
+    uvec2 pix = gl_GlobalInvocationID.xy;
+    if (pix.x >= screen_w || pix.y >= screen_h) return;
+
+    vec2 pt = vec2(pix) + 0.5;
+
+    vec3 color = vec3(0.04, 0.04, 0.08);  // dark background
+
+    if (n < 2u) {
+        imageStore(output_screen, ivec2(pix), vec4(color, 1.0));
+        return;
+    }
+
+    uint n_internal  = n - 1u;
+    uint node_count  = 2u * n - 1u;
+
+    // ── Internal nodes: filled dim region ────────────────────────────────────
+    for (uint i = 0u; i < n_internal; i++) {
+        BVHNode nd = nodes[i];
+        if (pt.x < nd.aabb_min.x || pt.y < nd.aabb_min.y ||
+            pt.x >= nd.aabb_max.x || pt.y >= nd.aabb_max.y) continue;
+
+        float hue = float(i) / float(n_internal);
+        color = mix(color, hue_rgb(hue) * 0.4, 0.18);
+    }
+
+    // ── Leaf nodes: bright 1-pixel border ────────────────────────────────────
+    for (uint i = n_internal; i < node_count; i++) {
+        BVHNode nd = nodes[i];
+        if (nd.object_id < 0) continue;
+
+        if (on_border(pt, nd.aabb_min, nd.aabb_max)) {
+            float hue = fract(float(nd.object_id) * 0.618034);
+            color = mix(color, hue_rgb(hue), 0.85);
+        }
+    }
+
+    imageStore(output_screen, ivec2(pix), vec4(color, 1.0));
+}

@@ -38,6 +38,16 @@ add_executable (Residua
   src/physics/physics_engine.h
   src/physics/sdf_generator.cpp
   src/physics/sdf_generator.h
+  src/physics/shape_gen.cpp
+  src/physics/shape_gen.h
+  src/physics/lbvh.cpp
+  src/physics/lbvh.h
+  src/physics/collision.cpp
+  src/physics/collision.h
+  src/physics/vertex_color.cpp
+  src/physics/vertex_color.h
+  src/physics/avbd.cpp
+  src/physics/avbd.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)

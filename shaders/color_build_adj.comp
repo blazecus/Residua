@@ -1,0 +1,53 @@
+// color_build_adj.comp
+//
+// One thread per contact. For each active contact between two dynamic bodies,
+// inserts each body into the other's adjacency list.
+// Static bodies (inv_mass == 0) are excluded — they share no constraints that
+// require serialisation in the AVBD solver.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+#include "collision_types.glsl"
+
+layout(local_size_x = 64) in;
+
+#define MAX_BODY_ADJ 64u
+
+layout(push_constant) uniform PC { uint max_contacts; };
+
+layout(set = 0, binding = 0) readonly buffer ContactBuf { Contact   contacts[]; };
+layout(set = 0, binding = 1) readonly buffer CtCount    { uint      contact_count; };
+layout(set = 0, binding = 2) readonly buffer BodyBuf    { RigidBody bodies[]; };
+layout(set = 0, binding = 3)          buffer AdjCount   { uint      adj_count[]; };
+layout(set = 0, binding = 4)          buffer AdjList    { uint      adj_list[]; };  // [body * MAX_BODY_ADJ + slot]
+
+// Insert `neighbor` into body's adjacency list.
+// Silently drops the entry if the list is already full (capped at MAX_BODY_ADJ).
+void try_insert(uint body, uint neighbor) {
+    uint slot = atomicAdd(adj_count[body], 1u);
+    if (slot < MAX_BODY_ADJ) {
+        adj_list[body * MAX_BODY_ADJ + slot] = neighbor;
+    }
+    // If slot >= MAX_BODY_ADJ the list is full; adj_count may exceed MAX_BODY_ADJ
+    // but propose clamps to MAX_BODY_ADJ when iterating.
+}
+
+void main() {
+    uint ci = gl_GlobalInvocationID.x;
+    if (ci >= contact_count) return;
+
+    Contact c = contacts[ci];
+    if (c.valid == 0u) return;
+
+    uint ia = c.body_a;
+    uint ib = c.body_b;
+
+    // Skip static bodies — they don't participate in coloring.
+    bool a_dynamic = bodies[ia].inv_mass > 0.0;
+    bool b_dynamic = bodies[ib].inv_mass > 0.0;
+    if (!a_dynamic || !b_dynamic) return;
+
+    try_insert(ia, ib);
+    try_insert(ib, ia);
+}

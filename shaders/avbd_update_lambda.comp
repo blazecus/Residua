@@ -1,0 +1,70 @@
+// avbd_update_lambda.comp  —  Algorithm 1, lines 26-35
+//
+// Per contact, after all color groups have been solved for this iteration:
+//
+//   Normal (hard, λ_n ≥ 0):
+//     λ_n ← max(0, k_n*C_n + λ_n)
+//     if λ_n > 0:  k_n += β|C_n|       (active constraint, not at boundary)
+//
+//   Friction (hard, |λ_t| ≤ μ*λ_n):
+//     λ_t ← clamp(k_t*C_t + λ_t,  −μλ_n, +μλ_n)
+//     if |λ_t| < μλ_n:  k_t += β|C_t|  (stiction — within friction cone)
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+#include "collision_types.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    float beta;
+    float mu;
+    uint  max_contacts;
+    uint  _pad;
+};
+
+layout(set = 0, binding = 0) readonly buffer BodyBuf    { RigidBody bodies[]; };
+layout(set = 0, binding = 1)          buffer ContactBuf { Contact   contacts[]; };
+layout(set = 0, binding = 2) readonly buffer CtCount    { uint      contact_count; };
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= contact_count) return;
+    if (contacts[j].valid == 0u) return;
+
+    vec2  n     = contacts[j].normal;
+    vec2  t     = vec2(-n.y, n.x);
+    vec2  r_a   = contacts[j].r_a;
+    vec2  r_b   = contacts[j].r_b;
+    float depth = contacts[j].depth;
+
+    uint ia = contacts[j].body_a;
+    uint ib = contacts[j].body_b;
+    vec2 pa = bodies[ia].position;
+    vec2 pb = bodies[ib].position;
+
+    vec2  rel = pa + r_a - pb - r_b;
+    float C_n = depth - dot(n, rel);
+    float C_t = dot(t, rel);
+
+    float lam_n = contacts[j].lambda_n;
+    float lam_t = contacts[j].lambda_t;
+    float rho_n = contacts[j].rho_n;
+    float rho_t = contacts[j].rho_t;
+
+    // Normal: hard constraint, λ ∈ [0, ∞)
+    float new_lam_n = max(0.0, rho_n * C_n + lam_n);
+    contacts[j].lambda_n = new_lam_n;
+    // k grows when constraint is active (0 < λ < ∞)
+    if (new_lam_n > 0.0)
+        contacts[j].rho_n = rho_n + beta * abs(C_n);
+
+    // Friction: hard constraint, λ ∈ [−μλ_n, +μλ_n]
+    float mu_fn     = mu * new_lam_n;
+    float new_lam_t = clamp(rho_t * C_t + lam_t, -mu_fn, mu_fn);
+    contacts[j].lambda_t = new_lam_t;
+    // k grows in stiction regime (|λ_t| strictly inside cone)
+    if (abs(new_lam_t) < mu_fn)
+        contacts[j].rho_t = rho_t + beta * abs(C_t);
+}

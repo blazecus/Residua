@@ -1,0 +1,144 @@
+// avbd_solve.comp  —  Algorithm 1, lines 8-24
+//
+// One thread per body in the current color group.  For each contact involving
+// the body, accumulates force f and Hessian H contributions, then takes a
+// Newton step: Δx = H⁻¹ f.
+//
+// Constraint setup for a contact with normal n (from B toward A), depth d > 0:
+//
+//   Normal (hard, λ_n ≥ 0):
+//     C_n = d − n·(pA − pB)   (> 0 when penetrating, 0 at rest)
+//     ∂C_n/∂x_A = (−n, −(r_A×n))   → body A force: +clamp * (n, r_A×n)
+//     ∂C_n/∂x_B = (+n, +(r_B×n))   → body B force: −clamp * (n, r_B×n)
+//
+//   Friction (hard, |λ_t| ≤ μ|λ_n|):
+//     t = perp(n) = (−n_y, n_x)
+//     C_t = t·(pA − pB)
+//     ∂C_t/∂x_A = (t, r_A×t)   → body A force: −clamp_t * (t, r_A×t)
+//     ∂C_t/∂x_B = (−t, −(r_B×t)) → body B force: +clamp_t * (t, r_B×t)
+//
+// where pA = pos_A + r_A,  pB = pos_B + r_B  (r stored world-space at detection).
+// H contribution: k * J ⊗ J (same for both bodies, J uses the respective r).
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+#include "collision_types.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint  color;
+    uint  body_count;
+    uint  max_contacts;
+    float dt;
+    float mu;
+};
+
+layout(set = 0, binding = 0)          buffer BodyBuf    { RigidBody    bodies[]; };
+layout(set = 0, binding = 1) readonly buffer ContactBuf { Contact      contacts[]; };
+layout(set = 0, binding = 2) readonly buffer CtCount    { uint         contact_count; };
+layout(set = 0, binding = 3) readonly buffer InertiaBuf { InertiaTarget inertia[]; };
+layout(set = 0, binding = 4) readonly buffer ColorBuf   { uint         body_colors[]; };
+
+// 2D scalar cross product: a × b = ax*by − ay*bx
+float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= body_count) return;
+    if (body_colors[i] != color) return;
+    if (bodies[i].inv_mass == 0.0) return;   // static body
+
+    float inv_m  = bodies[i].inv_mass;
+    float inv_I  = bodies[i].inv_inertia;
+    float inv_dt2 = 1.0 / (dt * dt);
+
+    // M / dt²  (inertia coefficient)
+    float m_dt2 = inv_dt2 / inv_m;
+    float I_dt2 = (inv_I > 0.0) ? inv_dt2 / inv_I : 1e15;  // large = no rotation
+
+    vec2  pos = bodies[i].position;
+    float rot = bodies[i].rotation;
+    vec2  y_pos = inertia[i].pos;
+    float y_rot = inertia[i].rot;
+
+    // f_i = −(M/dt²)(x_i − y_i)
+    vec3 f = vec3(
+        -m_dt2 * (pos.x - y_pos.x),
+        -m_dt2 * (pos.y - y_pos.y),
+        -I_dt2 * (rot   - y_rot  )
+    );
+
+    // H_i = M/dt²
+    mat3 H = mat3(
+        m_dt2, 0.0,   0.0,
+        0.0,   m_dt2, 0.0,
+        0.0,   0.0,   I_dt2
+    );
+
+    // ── Contact contributions ─────────────────────────────────────────────────
+    uint nc = min(contact_count, max_contacts);
+    for (uint j = 0u; j < nc; j++) {
+        if (contacts[j].valid == 0u) continue;
+
+        uint ia = contacts[j].body_a;
+        uint ib = contacts[j].body_b;
+        if (ia != i && ib != i) continue;
+
+        bool is_a = (ia == i);
+
+        vec2  n     = contacts[j].normal;   // B → A
+        vec2  t     = vec2(-n.y, n.x);      // tangent (90° CCW)
+        vec2  r_a   = contacts[j].r_a;
+        vec2  r_b   = contacts[j].r_b;
+        float depth = contacts[j].depth;
+        float lam_n = contacts[j].lambda_n;
+        float lam_t = contacts[j].lambda_t;
+        float rho_n = contacts[j].rho_n;
+        float rho_t = contacts[j].rho_t;
+
+        vec2 pa = bodies[ia].position;
+        vec2 pb = bodies[ib].position;
+
+        // Current constraint values
+        vec2  rel   = pa + r_a - pb - r_b;
+        float C_n   = depth - dot(n, rel);   // > 0 when penetrating
+        float C_t   = dot(t, rel);
+
+        // Clamped augmented Lagrangian multipliers
+        float clamped_n = max(0.0, rho_n * C_n + lam_n);
+        float mu_fn     = mu * max(0.0, lam_n);
+        float clamped_t = clamp(rho_t * C_t + lam_t, -mu_fn, mu_fn);
+
+        // Jacobians for this body's DOFs
+        vec3 Jn, Jt;
+        if (is_a) {
+            // For body A: J_n = (n, r_A×n),  J_t = (t, r_A×t)
+            Jn = vec3(n.x, n.y, cross2(r_a, n));
+            Jt = vec3(t.x, t.y, cross2(r_a, t));
+            // Normal pushes A in +n:   f += clamp_n * Jn
+            // Friction opposes sliding: f -= clamp_t * Jt
+            f += clamped_n * Jn;
+            f -= clamped_t * Jt;
+        } else {
+            // For body B: J_n = (n, r_B×n),  J_t = (t, r_B×t)
+            Jn = vec3(n.x, n.y, cross2(r_b, n));
+            Jt = vec3(t.x, t.y, cross2(r_b, t));
+            // Normal pushes B in −n:   f -= clamp_n * Jn
+            // Friction:                f += clamp_t * Jt
+            f -= clamped_n * Jn;
+            f += clamped_t * Jt;
+        }
+
+        // Hessian: k * J^T J  (outer product, sign cancels)
+        H += rho_n * outerProduct(Jn, Jn);
+        H += rho_t * outerProduct(Jt, Jt);
+    }
+
+    // ── Newton step: x_new = x + H⁻¹ f ──────────────────────────────────────
+    vec3 dx = inverse(H) * f;
+
+    bodies[i].position += dx.xy;
+    bodies[i].rotation += dx.z;
+}

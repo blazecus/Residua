@@ -1,0 +1,64 @@
+// collision_broadphase.comp
+//
+// One thread per body. Each thread traverses the LBVH and records every
+// AABB-overlapping pair (i, j) where j > i, avoiding duplicates.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+#include "collision_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint n;          // active body count
+    uint max_pairs;
+};
+
+layout(set = 0, binding = 0) readonly buffer AABBBuf    { AABB         body_aabbs[]; };
+layout(set = 0, binding = 1) readonly buffer NodeBuf    { BVHNode      nodes[]; };
+layout(set = 0, binding = 2)          buffer PairBuf    { CandidatePair pairs[]; };
+layout(set = 0, binding = 3)          buffer PairCount  { uint         pair_count; };
+
+bool aabb_overlap(vec2 mn_a, vec2 mx_a, vec2 mn_b, vec2 mx_b) {
+    return all(lessThan(mn_a, mx_b)) && all(lessThan(mn_b, mx_a));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n || n < 2u) return;
+
+    vec2 my_mn = body_aabbs[i].min_pt;
+    vec2 my_mx = body_aabbs[i].max_pt;
+
+    // Iterative BVH traversal with a local stack (depth ≤ 32 for up to 4B leaves).
+    uint stack[32];
+    int  top = 0;
+    stack[top++] = 0u;  // start at root (node 0)
+
+    while (top > 0) {
+        uint      ni   = stack[--top];
+        BVHNode   node = nodes[ni];
+
+        if (!aabb_overlap(my_mn, my_mx, node.aabb_min, node.aabb_max))
+            continue;
+
+        if (node.object_id >= 0) {
+            // Leaf: node.object_id is the original body index.
+            uint j = uint(node.object_id);
+            if (j > i) {
+                uint slot = atomicAdd(pair_count, 1u);
+                if (slot < max_pairs) {
+                    pairs[slot].body_a = i;
+                    pairs[slot].body_b = j;
+                }
+            }
+        } else {
+            // Internal: push both children (need 2 free slots).
+            if (top + 2 <= 32) {
+                stack[top++] = uint(node.left);
+                stack[top++] = uint(node.right);
+            }
+        }
+    }
+}

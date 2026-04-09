@@ -1,0 +1,41 @@
+// lbvh_aabb.comp
+// Computes a tight world-space AABB for each rigid body by rotating all of its
+// local-space collision-shape vertices and taking the axis-aligned extremes.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC { uint n; };
+
+layout(set = 0, binding = 0) readonly buffer Bodies { RigidBody     bodies[]; };
+layout(set = 0, binding = 1) readonly buffer Shapes { CollisionShape shapes[]; };
+layout(set = 0, binding = 2) writeonly buffer AABBs  { AABB          aabbs[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) return;
+
+    RigidBody b = bodies[i];
+    uint      cnt = shapes[i].count;
+
+    float c = cos(b.rotation);
+    float s = sin(b.rotation);
+
+    vec2 mn = vec2( 1e38,  1e38);
+    vec2 mx = vec2(-1e38, -1e38);
+
+    for (uint j = 0u; j < cnt; j++) {
+        vec2 v = shapes[i].verts[j];
+        // Rotate local vertex into world space (translation added after min/max)
+        vec2 w = vec2(c * v.x - s * v.y,
+                      s * v.x + c * v.y);
+        mn = min(mn, w);
+        mx = max(mx, w);
+    }
+
+    aabbs[i].min_pt = b.position + mn;
+    aabbs[i].max_pt = b.position + mx;
+}

@@ -1,0 +1,73 @@
+// color_propose.comp
+//
+// Jones-Plassman parallel graph coloring — propose phase.
+//
+// Each uncolored body checks whether it has strictly higher priority than every
+// uncolored neighbour. If so, it proposes the lowest color not already used by
+// any neighbour (colored or not). Because priority is unique (hash + index
+// tie-break), no two adjacent bodies can both propose in the same round, so
+// there are no colour conflicts to resolve in the commit phase.
+//
+// proposed_color[i] = UINT_MAX means "no proposal this round".
+// Colors are indices in [0, 31]; a uint bitmask suffices for 32 colours.
+
+#version 460
+
+layout(local_size_x = 64) in;
+
+#define MAX_BODY_ADJ  64u
+#define UNCOLORED     0xFFFFFFFFu
+
+layout(push_constant) uniform PC { uint body_count; };
+
+layout(set = 0, binding = 0) readonly buffer ColorBuf    { uint body_colors[]; };
+layout(set = 0, binding = 1) readonly buffer AdjCount    { uint adj_count[]; };
+layout(set = 0, binding = 2) readonly buffer AdjList     { uint adj_list[]; };
+layout(set = 0, binding = 3)          buffer ProposedBuf { uint proposed_color[]; };
+
+// Avalanche hash for a body index → priority value.
+uint body_hash(uint x) {
+    x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+    x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+    x = (x >> 16u) ^ x;
+    return x;
+}
+
+// Returns true if body i has strictly higher priority than body j.
+// Tie-break by index so every pair has a defined ordering.
+bool higher_priority(uint i, uint j) {
+    uint hi = body_hash(i);
+    uint hj = body_hash(j);
+    return (hi > hj) || (hi == hj && i > j);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= body_count) return;
+
+    // Already colored — nothing to do.
+    if (body_colors[i] != UNCOLORED) { proposed_color[i] = UNCOLORED; return; }
+
+    uint cnt = min(adj_count[i], MAX_BODY_ADJ);
+
+    // Check if i is the highest-priority uncolored body among its neighbours.
+    for (uint k = 0u; k < cnt; k++) {
+        uint j = adj_list[i * MAX_BODY_ADJ + k];
+        if (body_colors[j] == UNCOLORED && higher_priority(j, i)) {
+            // Neighbour j beats us — defer to a later round.
+            proposed_color[i] = UNCOLORED;
+            return;
+        }
+    }
+
+    // Collect colors already used by any neighbour (colored or proposed-but-not-yet-committed).
+    uint used_mask = 0u;
+    for (uint k = 0u; k < cnt; k++) {
+        uint j   = adj_list[i * MAX_BODY_ADJ + k];
+        uint col = body_colors[j];
+        if (col < 32u) used_mask |= (1u << col);
+    }
+
+    // Assign the lowest available color.
+    proposed_color[i] = findLSB(~used_mask);
+}

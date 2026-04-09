@@ -159,7 +159,14 @@ void ResiduaEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 void ResiduaEngine::draw()
 {
 	//wait until the gpu has finished rendering the last frame. Timeout of 1 second
-	VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+	{
+        VkResult fence_result = vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000);
+        if (fence_result == VK_TIMEOUT) {
+            fmt::print("vkWaitForFences: GPU TIMEOUT — a shader is likely hanging (infinite loop / deadlock)\n");
+            abort();
+        }
+        VK_CHECK(fence_result);
+    }
 
 	get_current_frame()._deletionQueue.flush();
 	//request image from the swapchain
@@ -568,20 +575,27 @@ void ResiduaEngine::init_vulkan()
 	features13.synchronization2 = true;
 	features13.maintenance4 = true;
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-   
+
    VkPhysicalDeviceVulkan12Features features12 {};
    features12.bufferDeviceAddress = true;
-   features12.descriptorIndexing = true; 
+   features12.descriptorIndexing = true;
    features12.descriptorBindingPartiallyBound = true;
    features12.descriptorBindingVariableDescriptorCount = true;
    features12.runtimeDescriptorArray = true;
    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
+    // rgba16f storage images require shaderStorageImageExtendedFormats (core 1.0)
+    VkPhysicalDeviceFeatures features10 {};
+    features10.shaderStorageImageExtendedFormats = true;
 
     // use vkbootstrap to select a gpu.
     // We want a gpu that can write to the SDL surface and supports vulkan 1.2
     vkb::PhysicalDeviceSelector selector { vkb_inst };
-    vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 3).set_required_features_13(features13).set_required_features_12(features12).set_surface(_surface).select().value();
+    vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 3)
+        .set_required_features(features10)
+        .set_required_features_13(features13)
+        .set_required_features_12(features12)
+        .set_surface(_surface).select().value();
 
     // physicalDevice.features.
     // create the final vulkan device

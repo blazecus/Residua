@@ -1,0 +1,49 @@
+// lbvh_radix_scan.comp
+// Pass 2 of 3 for one radix-sort digit:
+//   Transforms block_hist[block * 256 + digit] from per-block counts into
+//   global exclusive prefix sums (global output positions for each (block, digit) pair).
+//   One thread per digit column; single workgroup.
+//
+// The correct global position for an element with digit d in block b is:
+//   (total elements with digits 0..d-1 across ALL blocks)   <- global digit offset
+//   + (total elements with digit d in blocks 0..b-1)        <- intra-digit block offset
+//
+// Phase 1: column-wise scan gives the intra-digit block offsets.
+// Phase 2: shared-memory prefix over digit totals adds the global digit offset.
+
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC { uint n_blocks; };
+
+layout(set = 0, binding = 0) buffer BlockHist { uint block_hist[]; };
+
+shared uint digit_totals[256];
+
+void main() {
+    uint d = gl_LocalInvocationID.x;   // digit column 0..255
+
+    // ── Phase 1: column-wise exclusive scan ──────────────────────────────────
+    // block_hist[b*256+d] ← number of digit-d elements in blocks 0..b-1
+    uint sum = 0u;
+    for (uint b = 0u; b < n_blocks; b++) {
+        uint idx   = b * 256u + d;
+        uint count = block_hist[idx];
+        block_hist[idx] = sum;
+        sum += count;
+    }
+    digit_totals[d] = sum;   // total count for this digit across all blocks
+    barrier();
+
+    // ── Phase 2: add global digit start offset ───────────────────────────────
+    // global_offset[d] = sum of digit_totals[d'] for d' < d
+    uint global_offset = 0u;
+    for (uint d2 = 0u; d2 < d; d2++) {
+        global_offset += digit_totals[d2];
+    }
+
+    for (uint b = 0u; b < n_blocks; b++) {
+        block_hist[b * 256u + d] += global_offset;
+    }
+}

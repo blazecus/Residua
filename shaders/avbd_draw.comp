@@ -1,0 +1,58 @@
+// avbd_draw.comp
+// One workgroup per body. Each thread handles a subset of the body's pixels,
+// rotating and translating them into world space, then writing to output_screen.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint body_count;
+    uint screen_w;
+    uint screen_h;
+};
+
+layout(set = 0, binding = 0) readonly buffer BodyBuf      { RigidBody bodies[]; };
+layout(set = 0, binding = 1) readonly buffer InfoBuf      { uvec4     body_info[]; };  // (width, height, 0, 0)
+layout(set = 0, binding = 2) readonly buffer PixelBuf     { vec4      pixel_colors[]; };
+layout(set = 0, binding = 3, rgba16f) uniform image2D output_screen;
+
+const uint MAX_PIXELS = 4096u;  // 64 * 64
+
+void main() {
+    uint body_idx = gl_WorkGroupID.x;
+    if (body_idx >= body_count) return;
+
+    uint w = body_info[body_idx].x;
+    uint h = body_info[body_idx].y;
+    if (w == 0u || h == 0u) return;  // static/invisible body
+
+    RigidBody body = bodies[body_idx];
+    float c = cos(body.rotation);
+    float s = sin(body.rotation);
+
+    uint total = w * h;
+    for (uint i = gl_LocalInvocationID.x; i < total; i += 256u) {
+        uint lx = i % w;
+        uint ly = i / w;
+
+        // Local pixel centre relative to image centre
+        vec2 local = vec2(float(lx), float(ly)) - vec2(float(w), float(h)) * 0.5 + 0.5;
+
+        // Rotate into world space and translate to body position
+        vec2 world = body.position + vec2(
+            c * local.x - s * local.y,
+            s * local.x + c * local.y
+        );
+
+        ivec2 coord = ivec2(floor(world));
+        if (coord.x < 0 || coord.y < 0 ||
+            coord.x >= int(screen_w) || coord.y >= int(screen_h)) continue;
+
+        vec4 color = pixel_colors[body_idx * MAX_PIXELS + i];
+        if (color.a > 0.0)
+            imageStore(output_screen, coord, color);
+    }
+}

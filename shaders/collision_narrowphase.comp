@@ -1,0 +1,133 @@
+// collision_narrowphase.comp
+//
+// One thread per candidate pair. For each pair runs a vertex-edge narrowphase:
+//   - find the deepest vertex of A inside B  → contact 0
+//   - find the deepest vertex of B inside A  → contact 1
+//
+// A vertex v is "inside" polygon P when the maximum signed distance from v to any
+// outward-facing edge of P is negative; the shallowest edge (max d, still < 0) is
+// chosen as the contact edge — minimum-penetration resolution, exact for convex shapes.
+// Edge normals are precomputed in local space by make_shape() and stored in CollisionShape.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+#include "collision_types.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC { uint max_contacts; };
+
+layout(set = 0, binding = 0) readonly buffer BodyBuf    { RigidBody     bodies[]; };
+layout(set = 0, binding = 1) readonly buffer ShapeBuf   { CollisionShape shapes[]; };
+layout(set = 0, binding = 2) readonly buffer PairBuf    { CandidatePair pairs[]; };
+layout(set = 0, binding = 3) readonly buffer PairCount  { uint          pair_count; };
+layout(set = 0, binding = 4)          buffer ContactBuf { Contact       contacts[]; };
+layout(set = 0, binding = 5)          buffer CtCount    { uint          contact_count; };
+
+vec2 rot2(vec2 v, float r) {
+    float c = cos(r), s = sin(r);
+    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Search all vertices of body `idx_src` (world-space) for the one with greatest
+// penetration into polygon `idx_dst`.
+// Returns the penetration depth (positive = penetrating); fills out_normal and out_pos.
+// out_normal is the outward normal of `idx_dst` at the contact edge,
+// i.e. it points FROM idx_dst TOWARD idx_src.
+float find_deepest_vertex(
+    uint idx_src, vec2 pos_src, float rot_src,
+    uint idx_dst, vec2 pos_dst, float rot_dst,
+    out vec2 out_normal, out vec2 out_pos)
+{
+    uint cnt_src = shapes[idx_src].count;
+    uint cnt_dst = shapes[idx_dst].count;
+
+    float best_depth = 0.0;  // only record if > 0 (penetrating)
+    out_normal = vec2(0.0, 1.0);
+    out_pos    = vec2(0.0);
+
+    for (uint ia = 0u; ia < cnt_src; ia++) {
+        vec2 v = pos_src + rot2(shapes[idx_src].verts[ia], rot_src);
+
+        // For each edge of dst, compute the signed distance from v.
+        // We want the maximum (shallowest) d. If max_d < 0, v is inside dst.
+        float max_d = -1e38;
+        vec2  max_n = vec2(0.0, 1.0);
+
+        for (uint ib = 0u; ib < cnt_dst; ib++) {
+            vec2 e0 = pos_dst + rot2(shapes[idx_dst].verts[ib], rot_dst);
+            // Outward normal is precomputed in local space; rotate it to world space.
+            vec2 n  = rot2(shapes[idx_dst].normals[ib], rot_dst);
+
+            float d = dot(n, v - e0);
+            if (d > max_d) { max_d = d; max_n = n; }
+        }
+
+        // v penetrates dst if the shallowest edge still has d < 0.
+        float depth = -max_d;
+        if (depth > best_depth) {
+            best_depth = depth;
+            out_normal = max_n;
+            out_pos    = v;
+        }
+    }
+
+    return best_depth;
+}
+
+void emit_contact(uint ia, uint ib, vec2 normal, float depth, vec2 contact_pos,
+                  vec2 pos_a, vec2 pos_b)
+{
+    uint slot = atomicAdd(contact_count, 1u);
+    if (slot >= max_contacts) return;
+
+    Contact c;
+    c.body_a   = ia;
+    c.body_b   = ib;
+    c.normal   = normal;
+    c.depth    = depth;
+    c.valid    = 1u;
+    c.r_a      = contact_pos - pos_a;
+    c.r_b      = contact_pos - pos_b;
+    c.lambda_n = 0.0;
+    c.lambda_t = 0.0;
+    c.rho_n    = CONTACT_INITIAL_RHO;
+    c.rho_t    = CONTACT_INITIAL_RHO;
+    c._pad     = vec2(0.0);
+    contacts[slot] = c;
+}
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    if (pair_idx >= pair_count) return;
+
+    uint ia = pairs[pair_idx].body_a;
+    uint ib = pairs[pair_idx].body_b;
+
+    RigidBody ba = bodies[ia];
+    RigidBody bb = bodies[ib];
+
+    // ── Vertices of A penetrating B ───────────────────────────────────────────
+    // normal_ab: outward from B → points from B toward A  ✓
+    vec2  normal_ab; vec2 pos_ab;
+    float depth_ab = find_deepest_vertex(
+        ia, ba.position, ba.rotation,
+        ib, bb.position, bb.rotation,
+        normal_ab, pos_ab);
+
+    if (depth_ab > 0.0)
+        emit_contact(ia, ib, normal_ab, depth_ab, pos_ab, ba.position, bb.position);
+
+    // ── Vertices of B penetrating A ───────────────────────────────────────────
+    // normal_ba: outward from A → points from A toward B.
+    // Flip for the Contact convention (normal from B toward A) → -normal_ba.
+    vec2  normal_ba; vec2 pos_ba;
+    float depth_ba = find_deepest_vertex(
+        ib, bb.position, bb.rotation,
+        ia, ba.position, ba.rotation,
+        normal_ba, pos_ba);
+
+    if (depth_ba > 0.0)
+        emit_contact(ia, ib, -normal_ba, depth_ba, pos_ba, ba.position, bb.position);
+}

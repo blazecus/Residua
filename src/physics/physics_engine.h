@@ -7,25 +7,13 @@
 #include "../renderer/vk_types.h"
 #include "../renderer/vk_descriptors.h"
 #include "sdf_generator.h"
+#include "shape_gen.h"
+#include "lbvh.h"       // defines RigidBody (AVBD), AABB, BVHNode, PHYSICS_WIDTH/HEIGHT
+#include "collision.h"
+#include "vertex_color.h"
+#include "avbd.h"
 
 class ResiduaEngine;
-
-static constexpr uint32_t PHYSICS_WIDTH  = 480;
-static constexpr uint32_t PHYSICS_HEIGHT = 270;
-
-// ─── GPU struct mirrors (must match physics_types.glsl) ───────────────────────
-
-struct RigidBody {          // 40 bytes
-    glm::vec2 position;
-    float     rotation;
-    float     total_mass;
-    glm::vec2 velocity;
-    float     angular_velocity;
-    float     I_com;
-    uint32_t  pixel_index;
-    uint32_t  _pad{0};
-};
-static_assert(sizeof(RigidBody) == 40);
 
 struct PhysicsPixel {       // 32 bytes
     glm::vec2 total_force;
@@ -78,7 +66,8 @@ static_assert(sizeof(CollisionPixel) == 32);
 struct LoadedBodyImage {
     uint32_t               width{}, height{};
     std::vector<glm::vec4> pixels;
-    std::vector<float>     sdf;   // signed distance field, computed on load
+    std::vector<float>     sdf;    // signed distance field, computed on load
+    std::vector<glm::vec2> shape;  // simplified collision polygon, in pixel-space coords
 };
 
 LoadedBodyImage load_body_image(const char* path);
@@ -162,8 +151,50 @@ struct PhysicsPipeline {
 
     void dispatch(VkCommandBuffer cmd, float dt);
 
+    // ── AVBD system ───────────────────────────────────────────────────────────
+    LBvhPipeline        lbvh;
+    CollisionPipeline   collision;
+    VertexColorPipeline vertex_color;
+    AvbdPipeline        avbd;
+    AvbdParams          avbd_params;
+
+    static constexpr uint32_t AVBD_MAX_BODY_PIXELS = 64 * 64; // largest supported body
+
+    AllocatedBuffer avbd_body_info_buf;    // glm::uvec4[max_bodies]: (width, height, 0, 0)
+    AllocatedBuffer avbd_pixel_colors_buf; // glm::vec4[max_bodies * AVBD_MAX_BODY_PIXELS]
+    AllocatedBuffer diag_counters_buf;     // uint32[2]: [pair_count, contact_count] from prev frame
+    uint32_t        avbd_body_count {0};
+    uint32_t        avbd_max_bodies {0};
+
+    struct AvbdDrawPipeline {
+        VkPipeline            pipeline    {VK_NULL_HANDLE};
+        VkPipelineLayout      layout      {VK_NULL_HANDLE};
+        VkDescriptorSetLayout desc_layout {VK_NULL_HANDLE};
+    } avbd_draw_pl;
+    VkDescriptorSet     avbd_draw_desc {};
+    DescriptorAllocatorGrowable avbd_draw_alloc;
+
+    struct BvhDebugPipeline {
+        VkPipeline            pipeline    {VK_NULL_HANDLE};
+        VkPipelineLayout      layout      {VK_NULL_HANDLE};
+        VkDescriptorSetLayout desc_layout {VK_NULL_HANDLE};
+    } bvh_debug_pl;
+    VkDescriptorSet     bvh_debug_desc {};
+    DescriptorAllocatorGrowable bvh_debug_alloc;
+
+    // Call instead of init() to use the new AVBD physics system.
+    void init_avbd(ResiduaEngine* engine, uint32_t max_bodies);
+
+    // Add a dynamic rigid body.  Returns slot index or UINT32_MAX on failure.
+    // mass is in arbitrary units; inertia is approximated from the shape bbox.
+    uint32_t add_avbd_body(ResiduaEngine* engine, const LoadedBodyImage& img,
+                            glm::vec2 pos, float mass = 1.0f, float rot = 0.0f);
+
 private:
     void init_tier(ResiduaEngine* engine, uint32_t tier_idx, uint32_t initial_capacity);
     void grow_tier_buffers(ResiduaEngine* engine, uint32_t tier_idx);
     void update_tier_descriptors(VkDevice device, uint32_t tier_idx);
+    void init_avbd_draw_pipeline(VkDevice device);
+    void init_bvh_debug_pipeline(VkDevice device);
+    void dispatch_avbd(VkCommandBuffer cmd, float dt);
 };

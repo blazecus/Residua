@@ -1,0 +1,35 @@
+// lbvh_radix_count.comp
+// Pass 1 of 3 for one radix-sort digit:
+//   Each workgroup of 256 threads processes 256 consecutive keys and writes a
+//   256-bucket histogram for its block into block_hist[block * 256 + digit].
+
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint bit_shift;   // 0, 8, 16, or 24
+};
+
+layout(set = 0, binding = 0) readonly buffer Keys      { uint keys[]; };
+layout(set = 0, binding = 1)          buffer BlockHist { uint block_hist[]; };
+
+shared uint s_hist[256];
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint block = gl_WorkGroupID.x;
+
+    s_hist[tid] = 0u;
+    barrier();
+
+    uint i = block * 256u + tid;
+    if (i < n) {
+        uint digit = (keys[i] >> bit_shift) & 0xFFu;
+        atomicAdd(s_hist[digit], 1u);
+    }
+    barrier();
+
+    block_hist[block * 256u + tid] = s_hist[tid];
+}

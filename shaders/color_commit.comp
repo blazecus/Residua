@@ -1,0 +1,29 @@
+// color_commit.comp
+//
+// Jones-Plassman parallel graph coloring — commit phase.
+//
+// Accepts any pending proposal written by color_propose.comp into body_colors[],
+// then resets proposed_color[] to UNCOLORED so the buffer is clean for the next
+// propose pass.
+
+#version 460
+
+layout(local_size_x = 64) in;
+
+#define UNCOLORED 0xFFFFFFFFu
+
+layout(push_constant) uniform PC { uint body_count; };
+
+layout(set = 0, binding = 0) buffer ColorBuf    { uint body_colors[]; };
+layout(set = 0, binding = 1) buffer ProposedBuf { uint proposed_color[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= body_count) return;
+
+    uint p = proposed_color[i];
+    if (p != UNCOLORED) {
+        body_colors[i]   = p;
+        proposed_color[i] = UNCOLORED;
+    }
+}

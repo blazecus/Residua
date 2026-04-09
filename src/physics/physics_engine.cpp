@@ -7,8 +7,10 @@
 #include <fmt/core.h>
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <random>
+#include <iostream>
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -34,7 +36,21 @@ LoadedBodyImage load_body_image(const char* path) {
     std::vector<float> alpha(result.width * result.height);
     for (uint32_t i = 0; i < alpha.size(); i++)
         alpha[i] = result.pixels[i].a;
-    result.sdf = compute_sdf(result.width, result.height, alpha);
+    result.sdf   = compute_sdf(result.width, result.height, alpha);
+    result.shape = generate_shape(result.width, result.height, alpha);
+
+    // Centre shape vertices around (0,0) using the bounding-box centre.
+    // After this the vertices are in local space (CoM = origin, before rotation).
+    if (!result.shape.empty()) {
+        glm::vec2 mn( 1e9f,  1e9f);
+        glm::vec2 mx(-1e9f, -1e9f);
+        for (const auto& v : result.shape) {
+            mn = glm::min(mn, v);
+            mx = glm::max(mx, v);
+        }
+        glm::vec2 center = (mn + mx) * 0.5f;
+        for (auto& v : result.shape) v -= center;
+    }
 
     return result;
 }
@@ -615,13 +631,14 @@ uint32_t PhysicsPipeline::add_body(
     }
 
     RigidBody body {
-        .position         = position,
-        .rotation         = rotation,
-        .total_mass       = total_mass,
-        .velocity         = {0.f, 0.f},
-        .angular_velocity = 0.f,
-        .I_com            = I_com,
-        .pixel_index      = slot * t.body_pixels,
+        .position    = position,
+        .velocity    = {0.f, 0.f},
+        .rotation    = rotation,
+        .ang_vel     = 0.f,
+        .inv_mass    = (total_mass > 0.f ? 1.f / total_mass : 0.f),
+        .inv_inertia = (I_com      > 0.f ? 1.f / I_com      : 0.f),
+        .prev_pos    = position,
+        .prev_rot    = rotation,
     };
 
     for (int i = 0; i < 2; i++) {
@@ -681,8 +698,13 @@ std::optional<std::pair<uint32_t, uint32_t>> PhysicsPipeline::body_at(glm::vec2 
 }
 
 void PhysicsPipeline::dispatch(VkCommandBuffer cmd, float dt) {
-    // Upload static SDF if the background job completed.
-    // Safe here because vkWaitForFences was called before this point.
+    // ── New AVBD system ───────────────────────────────────────────────────────
+    if (avbd_max_bodies > 0) {
+        dispatch_avbd(cmd, dt);
+        return;
+    }
+
+    // ── Legacy tier-based system (fallback) ───────────────────────────────────
     sdf_gen.poll([this](SdfResult&& result) {
         memcpy(static_sdf.info.pMappedData, result.sdf.data(),
                result.sdf.size() * sizeof(float));
@@ -896,4 +918,366 @@ void PhysicsPipeline::dispatch(VkCommandBuffer cmd, float dt) {
     }
 
     frame_parity ^= 1;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  AVBD system
+// ═════════════════════════════════════════════════════════════════════════════
+
+static glm::vec4 slot_color(uint32_t slot) {
+    float hue = std::fmod(float(slot) * 137.508f, 360.f);
+    float c = 0.72f, x = c * (1.f - std::abs(std::fmod(hue / 60.f, 2.f) - 1.f));
+    float m = 0.18f;
+    glm::vec3 rgb;
+    if      (hue < 60)  rgb = {c, x, 0};
+    else if (hue < 120) rgb = {x, c, 0};
+    else if (hue < 180) rgb = {0, c, x};
+    else if (hue < 240) rgb = {0, x, c};
+    else if (hue < 300) rgb = {x, 0, c};
+    else                rgb = {c, 0, x};
+    return glm::vec4(rgb + m, 1.f);
+}
+
+void PhysicsPipeline::init_avbd_draw_pipeline(VkDevice device)
+{
+    // Descriptor layout: 3 SSBOs (bodies, body_info, pixel_colors) + 1 storage image
+    VkDescriptorSetLayoutBinding binds[4] = {
+        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT },
+        { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT },
+        { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT },
+        { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT },
+    };
+    VkDescriptorSetLayoutCreateInfo dci {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 4,
+        .pBindings    = binds,
+    };
+    VK_CHECK(vkCreateDescriptorSetLayout(device, &dci, nullptr, &avbd_draw_pl.desc_layout));
+
+    VkPushConstantRange pc_range { VK_SHADER_STAGE_COMPUTE_BIT, 0, 12u }; // 3 × uint
+    VkPipelineLayoutCreateInfo plci {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &avbd_draw_pl.desc_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pc_range,
+    };
+    VK_CHECK(vkCreatePipelineLayout(device, &plci, nullptr, &avbd_draw_pl.layout));
+
+    VkShaderModule mod = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module("../shaders/avbd_draw.comp.spv", device, &mod)) {
+        fmt::print("init_avbd_draw_pipeline: failed to load shaders/avbd_draw.comp.spv\n");
+        return;
+    }
+    VkPipelineShaderStageCreateInfo stage {
+        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = mod,
+        .pName  = "main",
+    };
+    VkComputePipelineCreateInfo cpci {
+        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage  = stage,
+        .layout = avbd_draw_pl.layout,
+    };
+    VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &avbd_draw_pl.pipeline));
+    vkDestroyShaderModule(device, mod, nullptr);
+}
+
+void PhysicsPipeline::init_bvh_debug_pipeline(VkDevice device)
+{
+    // Descriptor: 1 SSBO (bvh nodes) + 1 storage image
+    VkDescriptorSetLayoutBinding binds[2] = {
+        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT },
+        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT },
+    };
+    VkDescriptorSetLayoutCreateInfo dci {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2,
+        .pBindings    = binds,
+    };
+    VK_CHECK(vkCreateDescriptorSetLayout(device, &dci, nullptr, &bvh_debug_pl.desc_layout));
+
+    VkPushConstantRange pc_range { VK_SHADER_STAGE_COMPUTE_BIT, 0, 12u }; // n, w, h
+    VkPipelineLayoutCreateInfo plci {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount         = 1,
+        .pSetLayouts            = &bvh_debug_pl.desc_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pc_range,
+    };
+    VK_CHECK(vkCreatePipelineLayout(device, &plci, nullptr, &bvh_debug_pl.layout));
+
+    VkShaderModule mod = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module("../shaders/bvh_debug.comp.spv", device, &mod)) {
+        fmt::print("init_bvh_debug_pipeline: failed to load shaders/bvh_debug.comp.spv\n");
+        return;
+    }
+    VkPipelineShaderStageCreateInfo stage {
+        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = mod,
+        .pName  = "main",
+    };
+    VkComputePipelineCreateInfo cpci {
+        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage  = stage,
+        .layout = bvh_debug_pl.layout,
+    };
+    VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &bvh_debug_pl.pipeline));
+    vkDestroyShaderModule(device, mod, nullptr);
+}
+
+void PhysicsPipeline::init_avbd(ResiduaEngine* engine, uint32_t max_bodies)
+{
+    avbd_max_bodies = max_bodies;
+
+    // output_screen — same format/usage as the old system
+    VkExtent3D screen_extent { PHYSICS_WIDTH, PHYSICS_HEIGHT, 1 };
+    output_screen = engine->create_image(screen_extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    engine->immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, output_screen.image,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    });
+    engine->_mainDeletionQueue.push_function([this, engine]() {
+        engine->destroy_image(output_screen);
+    });
+
+    // Physics pipelines
+    lbvh.init(engine, max_bodies);
+    collision.init(engine, lbvh, max_bodies);
+    vertex_color.init(engine, lbvh, collision, max_bodies);
+    avbd.init(engine, lbvh, collision, vertex_color, max_bodies);
+
+    // Diagnostic staging: 2×uint32 for pair_count + contact_count readback
+    diag_counters_buf = engine->create_buffer(
+        2 * sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    if (diag_counters_buf.info.pMappedData)
+        std::memset(diag_counters_buf.info.pMappedData, 0, 2 * sizeof(uint32_t));
+
+    // Per-body image draw buffers (CPU-visible so add_avbd_body can write directly)
+    avbd_body_info_buf = engine->create_buffer(
+        max_bodies * sizeof(glm::uvec4),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    avbd_pixel_colors_buf = engine->create_buffer(
+        max_bodies * AVBD_MAX_BODY_PIXELS * sizeof(glm::vec4),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    VkDevice dev = engine->_device;
+    init_avbd_draw_pipeline(dev);
+    init_bvh_debug_pipeline(dev);
+
+    // BVH debug descriptor set
+    {
+        const uint32_t max_nodes = 2 * max_bodies - 1;
+        DescriptorAllocatorGrowable::PoolSizeRatio dbg_ratios[] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4.f },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  2.f },
+        };
+        bvh_debug_alloc.init(dev, 2, dbg_ratios);
+        bvh_debug_desc = bvh_debug_alloc.allocate(dev, bvh_debug_pl.desc_layout);
+        DescriptorWriter w;
+        w.write_buffer(0, lbvh.bvh_nodes_buf.buffer, max_nodes * sizeof(BVHNode), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_image (1, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        w.update_set(dev, bvh_debug_desc);
+    }
+
+    DescriptorAllocatorGrowable::PoolSizeRatio draw_ratios[] = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16.f },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  2.f  },
+    };
+    avbd_draw_alloc.init(dev, 2, draw_ratios);
+    avbd_draw_desc = avbd_draw_alloc.allocate(dev, avbd_draw_pl.desc_layout);
+    {
+        DescriptorWriter w;
+        w.write_buffer(0, lbvh.bodies_buf.buffer,    max_bodies * sizeof(RigidBody),                           0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_buffer(1, avbd_body_info_buf.buffer, max_bodies * sizeof(glm::uvec4),                          0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_buffer(2, avbd_pixel_colors_buf.buffer, max_bodies * AVBD_MAX_BODY_PIXELS * sizeof(glm::vec4), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_image (3, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        w.update_set(dev, avbd_draw_desc);
+    }
+}
+
+uint32_t PhysicsPipeline::add_avbd_body(ResiduaEngine* engine, const LoadedBodyImage& img,
+                                          glm::vec2 pos, float mass, float rot)
+{
+    if (avbd_body_count >= avbd_max_bodies) {
+        fmt::print("add_avbd_body: body limit {} reached\n", avbd_max_bodies);
+        return UINT32_MAX;
+    }
+    uint32_t slot = avbd_body_count++;
+
+    CollisionShape shape = LBvhPipeline::make_shape(img.shape);
+
+    // Moment of inertia: approximate with bounding box of the shape
+    glm::vec2 mn( 1e9f,  1e9f), mx(-1e9f, -1e9f);
+    for (const auto& v : img.shape) { mn = glm::min(mn, v); mx = glm::max(mx, v); }
+    float bw = mx.x - mn.x, bh = mx.y - mn.y;
+    float I  = mass * (bw * bw + bh * bh) / 12.0f;
+    if (I < 1e-6f) I = 1.0f;
+
+    RigidBody body;
+    body.position    = pos;
+    body.velocity    = glm::vec2(0.f);
+    body.rotation    = rot;
+    body.ang_vel     = 0.f;
+    body.inv_mass    = (mass > 0.f) ? 1.0f / mass : 0.f;   // 0 = static
+    body.inv_inertia = (mass > 0.f) ? 1.0f / I   : 0.f;
+    body.prev_pos    = pos;
+    body.prev_rot    = rot;
+
+    lbvh.set_body(slot, body, shape);
+
+    // Upload per-pixel colors and body dimensions for the draw shader
+    auto* info   = reinterpret_cast<glm::uvec4*>(avbd_body_info_buf.info.pMappedData);
+    auto* pixels = reinterpret_cast<glm::vec4*>(avbd_pixel_colors_buf.info.pMappedData);
+    info[slot] = glm::uvec4(img.width, img.height, 0u, 0u);
+    uint32_t n = std::min((uint32_t)img.pixels.size(), AVBD_MAX_BODY_PIXELS);
+    std::memcpy(pixels + slot * AVBD_MAX_BODY_PIXELS, img.pixels.data(), n * sizeof(glm::vec4));
+
+    return slot;
+}
+
+void PhysicsPipeline::dispatch_avbd(VkCommandBuffer cmd, float dt)
+{
+    // ── Diagnostic readback from previous frame ───────────────────────────────
+    if (diag_counters_buf.info.pMappedData && avbd_body_count >= 2) {
+        static uint32_t diag_frame = 0;
+        /*
+        if (diag_frame % 60 == 0) {
+            auto* d = reinterpret_cast<uint32_t*>(diag_counters_buf.info.pMappedData);
+            fmt::print("[phys diag] frame={} bodies={} pair_count={} contact_count={}\n",
+                       diag_frame, avbd_body_count, d[0], d[1]);
+        }
+        */
+
+        auto* d = reinterpret_cast<uint32_t*>(diag_counters_buf.info.pMappedData);
+        if(d[1] > 0 || d[0] > 0){
+            fmt::print("[phys diag] frame={} bodies={} pair_count={} contact_count={}\n",
+                       diag_frame, avbd_body_count, d[0], d[1]);
+        }
+        diag_frame++;
+    }
+
+    // ── Physics ──────────────────────────────────────────────────────────────
+    if (avbd_body_count >= 2) {
+        lbvh.build(cmd, avbd_body_count);
+        collision.dispatch(cmd, avbd_body_count, lbvh);
+
+        // Copy pair_count and contact_count to CPU-readable staging (read next frame)
+        if (diag_counters_buf.buffer != VK_NULL_HANDLE) {
+            // compute write → transfer read
+            VkBufferMemoryBarrier2 b2[2] = {{
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                .buffer = collision.pair_count_buf.buffer, .offset=0, .size=VK_WHOLE_SIZE,
+            },{
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                .buffer = collision.contact_count_buf.buffer, .offset=0, .size=VK_WHOLE_SIZE,
+            }};
+            VkDependencyInfo dep2 { .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                    .bufferMemoryBarrierCount=2, .pBufferMemoryBarriers=b2 };
+            vkCmdPipelineBarrier2(cmd, &dep2);
+            VkBufferCopy c0 { 0, 0,                sizeof(uint32_t) };
+            VkBufferCopy c1 { 0, sizeof(uint32_t), sizeof(uint32_t) };
+            vkCmdCopyBuffer(cmd, collision.pair_count_buf.buffer,    diag_counters_buf.buffer, 1, &c0);
+            vkCmdCopyBuffer(cmd, collision.contact_count_buf.buffer, diag_counters_buf.buffer, 1, &c1);
+            // transfer write → compute read (vertex_color reads contact_count next)
+            VkBufferMemoryBarrier2 b3 = {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .buffer = collision.contact_count_buf.buffer, .offset=0, .size=VK_WHOLE_SIZE,
+            };
+            VkDependencyInfo dep3 { .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                    .bufferMemoryBarrierCount=1, .pBufferMemoryBarriers=&b3 };
+            vkCmdPipelineBarrier2(cmd, &dep3);
+        }
+
+        vertex_color.dispatch(cmd, avbd_body_count);
+        avbd.dispatch(cmd, avbd_body_count, /*n_colors=*/16, dt, avbd_params);
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    // Clear output_screen
+    VkClearColorValue clear_col { .float32 = { 0.f, 0.f, 0.f, 1.f } };
+    VkImageSubresourceRange full_range {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1,
+    };
+    vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL,
+                          &clear_col, 1, &full_range);
+
+    // Barrier: clear → compute write
+    VkImageMemoryBarrier2 img_barrier {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_CLEAR_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .image         = output_screen.image,
+        .subresourceRange = full_range,
+    };
+    VkDependencyInfo dep {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &img_barrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    struct { uint32_t n, w, h; } pc { avbd_body_count, PHYSICS_WIDTH, PHYSICS_HEIGHT };
+
+    // ── BVH debug background ──────────────────────────────────────────────────
+    if (bvh_debug_pl.pipeline != VK_NULL_HANDLE && avbd_body_count >= 2) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bvh_debug_pl.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 bvh_debug_pl.layout, 0, 1, &bvh_debug_desc, 0, nullptr);
+        vkCmdPushConstants(cmd, bvh_debug_pl.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
+
+        // bvh_debug writes output_screen; avbd_draw must see those writes
+        VkImageMemoryBarrier2 b2 {
+            .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+            .image         = output_screen.image,
+            .subresourceRange = full_range,
+        };
+        VkDependencyInfo dep2 { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b2 };
+        vkCmdPipelineBarrier2(cmd, &dep2);
+    }
+
+    // ── Draw bodies (pixels on top of BVH background) ────────────────────────
+    if (avbd_draw_pl.pipeline == VK_NULL_HANDLE) {
+        fmt::print("dispatch_avbd: draw pipeline is null — shader may have failed to compile\n");
+        return;
+    }
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, avbd_draw_pl.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                             avbd_draw_pl.layout, 0, 1, &avbd_draw_desc, 0, nullptr);
+    vkCmdPushConstants(cmd, avbd_draw_pl.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                        0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, avbd_body_count, 1, 1);  // one workgroup per body
 }

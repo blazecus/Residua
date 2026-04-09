@@ -1,0 +1,33 @@
+// avbd_warmstart.comp  —  Algorithm 1, lines 5-6
+//
+// Per contact: scale dual variables and penalty stiffnesses from the previous
+// timestep so they serve as a warm start for the new solve.
+//   λ ← α*γ*λ          (line 5)
+//   k ← max(k_start, γ*k)  (line 6)
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "collision_types.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    float alpha_gamma;  // α * γ combined
+    float gamma;
+    float k_start;
+    uint  _pad;
+};
+
+layout(set = 0, binding = 0)          buffer ContactBuf { Contact contacts[]; };
+layout(set = 0, binding = 1) readonly buffer CtCount    { uint    contact_count; };
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= contact_count) return;
+    if (contacts[j].valid == 0u) return;
+
+    contacts[j].lambda_n *= alpha_gamma;
+    contacts[j].lambda_t *= alpha_gamma;
+    contacts[j].rho_n     = max(k_start, contacts[j].rho_n * gamma);
+    contacts[j].rho_t     = max(k_start, contacts[j].rho_t * gamma);
+}

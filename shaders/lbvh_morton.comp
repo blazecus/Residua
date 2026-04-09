@@ -1,0 +1,51 @@
+// lbvh_morton.comp
+// Computes 32-bit 2D Morton codes from AABB centroids (normalized to [0,1] world space)
+// and initialises the body-index array to [0, 1, 2, ..., n-1] ready for sorting.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint  n;
+    float world_min_x;
+    float world_min_y;
+    float world_inv_ext_x;   // 1 / (world_max_x - world_min_x)
+    float world_inv_ext_y;
+};
+
+layout(set = 0, binding = 0) readonly  buffer AABBs   { AABB   aabbs[]; };
+layout(set = 0, binding = 1) writeonly buffer Morton  { uint   morton_codes[]; };
+layout(set = 0, binding = 2) writeonly buffer Indices { uint   body_indices[]; };
+
+// Expand a 16-bit value to 32 bits with a 0 bit interleaved between each input bit.
+uint expand_bits(uint v) {
+    v &= 0x0000FFFFu;
+    v = (v | (v <<  8u)) & 0x00FF00FFu;
+    v = (v | (v <<  4u)) & 0x0F0F0F0Fu;
+    v = (v | (v <<  2u)) & 0x33333333u;
+    v = (v | (v <<  1u)) & 0x55555555u;
+    return v;
+}
+
+// 32-bit 2D Morton code from normalised coordinates in [0,1].
+// 16 bits per axis, interleaved: x in even bits, y in odd bits.
+uint morton2d(float nx, float ny) {
+    uint ix = min(uint(nx * 65535.0), 65535u);
+    uint iy = min(uint(ny * 65535.0), 65535u);
+    return expand_bits(ix) | (expand_bits(iy) << 1u);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) return;
+
+    vec2  c  = (aabbs[i].min_pt + aabbs[i].max_pt) * 0.5;
+    float nx = clamp((c.x - world_min_x) * world_inv_ext_x, 0.0, 1.0);
+    float ny = clamp((c.y - world_min_y) * world_inv_ext_y, 0.0, 1.0);
+
+    morton_codes[i] = morton2d(nx, ny);
+    body_indices[i] = i;
+}

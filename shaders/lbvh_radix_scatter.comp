@@ -1,0 +1,45 @@
+// lbvh_radix_scatter.comp
+// Pass 3 of 3 for one radix-sort digit:
+//   Uses the prefix sums from block_hist to scatter each key/value pair to its
+//   sorted output position.
+
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint bit_shift;
+};
+
+layout(set = 0, binding = 0) readonly  buffer InKeys    { uint in_keys[]; };
+layout(set = 0, binding = 1) readonly  buffer InValues  { uint in_values[]; };
+layout(set = 0, binding = 2) writeonly buffer OutKeys   { uint out_keys[]; };
+layout(set = 0, binding = 3) writeonly buffer OutValues { uint out_values[]; };
+layout(set = 0, binding = 4) readonly  buffer BlockHist { uint block_hist[]; };
+
+shared uint s_prefix[256];   // global starting offset for each digit in this block
+shared uint s_local[256];    // running local rank within this block per digit
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint block = gl_WorkGroupID.x;
+
+    s_prefix[tid] = block_hist[block * 256u + tid];
+    s_local[tid]  = 0u;
+    barrier();
+
+    uint i = block * 256u + tid;
+    if (i < n) {
+        uint key   = in_keys[i];
+        uint val   = in_values[i];
+        uint digit = (key >> bit_shift) & 0xFFu;
+
+        // atomicAdd gives each thread in this block a unique local rank for its digit.
+        uint rank    = atomicAdd(s_local[digit], 1u);
+        uint out_pos = s_prefix[digit] + rank;
+
+        out_keys[out_pos]   = key;
+        out_values[out_pos] = val;
+    }
+}

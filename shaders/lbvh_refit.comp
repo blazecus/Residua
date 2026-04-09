@@ -1,0 +1,54 @@
+// lbvh_refit.comp
+// Refits internal-node AABBs bottom-up after the tree structure is built.
+// One thread per leaf. Each thread walks to the root, merging AABBs along the way.
+// An atomic flag per node ensures each internal node is processed exactly once
+// (by whichever of its two children finishes last).
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC { uint n; };
+
+layout(set = 0, binding = 0) readonly buffer  AABBs   { AABB    body_aabbs[]; };
+layout(set = 0, binding = 1) readonly buffer  Indices { uint    sorted_indices[]; };
+layout(set = 0, binding = 2) coherent buffer  Nodes   { BVHNode nodes[]; };
+layout(set = 0, binding = 3) coherent buffer  Flags   { int     flags[]; };
+
+void main() {
+    uint leaf_slot = gl_GlobalInvocationID.x;
+    if (leaf_slot >= n) return;
+
+    // Map sorted leaf slot → node array index.
+    int node_idx = int(n) - 1 + int(leaf_slot);
+
+    // Copy AABB from the body this leaf represents.
+    uint body_idx           = sorted_indices[leaf_slot];
+    nodes[node_idx].aabb_min  = body_aabbs[body_idx].min_pt;
+    nodes[node_idx].aabb_max  = body_aabbs[body_idx].max_pt;
+    nodes[node_idx].object_id = int(body_idx);
+
+    // Walk up to root, merging AABBs.
+    // Safety cap: a balanced BVH over 2^63 leaves has depth < 64.
+    // Using a fixed bound avoids TDR if broken parent pointers form a cycle.
+    int current = node_idx;
+    for (int _depth = 0; _depth < 64; _depth++) {
+        int parent = nodes[current].parent;
+        if (parent < 0) break;  // reached root
+
+        // First child to arrive stops; second child merges and continues.
+        // atomicAdd on a coherent buffer has AcquireRelease semantics, so the
+        // second child is guaranteed to see the first child's AABB writes.
+        int prev = atomicAdd(flags[parent], 1);
+        if (prev == 0) break;  // we are the first child; let sibling finish first
+
+        int L = nodes[parent].left;
+        int R = nodes[parent].right;
+        nodes[parent].aabb_min = min(nodes[L].aabb_min, nodes[R].aabb_min);
+        nodes[parent].aabb_max = max(nodes[L].aabb_max, nodes[R].aabb_max);
+
+        current = parent;
+    }
+}

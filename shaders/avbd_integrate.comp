@@ -1,0 +1,52 @@
+// avbd_integrate.comp  —  Algorithm 1, line 37
+//
+// Velocity update: v = (x − x^t) / dt
+// x^t was saved as prev_pos / prev_rot in avbd_predict.
+//
+// Also computes a tight world-space AABB for each body (replacing lbvh_aabb.comp).
+// Written into aabbs[] for use by lbvh_morton.comp on the next frame.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    float dt;
+    uint  body_count;
+};
+
+layout(set = 0, binding = 0) buffer   BodyBuf { RigidBody      bodies[]; };
+layout(set = 0, binding = 1) readonly buffer Shapes  { CollisionShape shapes[]; };
+layout(set = 0, binding = 2) writeonly buffer AABBs   { AABB          aabbs[];  };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= body_count) return;
+
+    // ── Compute tight world-space AABB ────────────────────────────────────────
+    RigidBody b   = bodies[i];
+    uint      cnt = shapes[i].count;
+    float c = cos(b.rotation);
+    float s = sin(b.rotation);
+
+    vec2 mn = vec2( 1e38,  1e38);
+    vec2 mx = vec2(-1e38, -1e38);
+    for (uint j = 0u; j < cnt; j++) {
+        vec2 v = shapes[i].verts[j];
+        vec2 w = vec2(c * v.x - s * v.y,
+                      s * v.x + c * v.y);
+        mn = min(mn, w);
+        mx = max(mx, w);
+    }
+    aabbs[i].min_pt = b.position + mn;
+    aabbs[i].max_pt = b.position + mx;
+
+    // ── Velocity update (dynamic bodies only) ─────────────────────────────────
+    if (bodies[i].inv_mass == 0.0) return;
+
+    float inv_dt = 1.0 / dt;
+    bodies[i].velocity = (bodies[i].position - bodies[i].prev_pos) * inv_dt;
+    bodies[i].ang_vel  = (bodies[i].rotation  - bodies[i].prev_rot) * inv_dt;
+}

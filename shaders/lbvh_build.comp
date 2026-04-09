@@ -1,0 +1,92 @@
+// lbvh_build.comp
+// Builds the LBVH tree structure in parallel using the Karras 2012 algorithm.
+// One thread per internal node. Assigns left/right children and parent pointers.
+//
+// Node array layout:
+//   internal nodes: [0,   n-2]
+//   leaf nodes:     [n-1, 2n-2]
+// Root is always node 0.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "lbvh_types.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC { uint n; };
+
+layout(set = 0, binding = 0) readonly buffer SortedKeys { uint sorted_keys[]; };
+layout(set = 0, binding = 1)          buffer Nodes      { BVHNode nodes[]; };
+
+// Count leading zeros of a 32-bit value.
+int clz(uint x) {
+    if (x == 0u) return 32;
+    return 31 - int(findMSB(x));
+}
+
+// Length of the longest common prefix of sorted_keys[i] and sorted_keys[j].
+// Returns -1 if j is out of range.
+// Duplicate keys are resolved by appending the index as low-order bits.
+int delta(int i, int j) {
+    if (j < 0 || j >= int(n)) return -1;
+    uint ki = sorted_keys[i];
+    uint kj = sorted_keys[j];
+    if (ki != kj) return clz(ki ^ kj);
+    return 32 + clz(uint(i) ^ uint(j));
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= int(n) - 1) return;
+
+    // ── Determine range [first, last] for internal node i ────────────────────
+    // d: direction the range extends from i (+1 or -1)
+    int d = (delta(i, i + 1) > delta(i, i - 1)) ? 1 : -1;
+
+    // Upper-bound doubling
+    int delta_min = delta(i, i - d);
+    int l_max = 2;
+    while (delta(i, i + l_max * d) > delta_min)
+        l_max *= 2;
+
+    // Binary search for exact range length
+    int l = 0;
+    for (int t = l_max / 2; t >= 1; t /= 2)
+        if (delta(i, i + (l + t) * d) > delta_min) l += t;
+
+    int j     = i + l * d;
+    int first = min(i, j);
+    int last  = max(i, j);
+
+    // ── Find split position gamma within [first, last] ────────────────────────
+    int gamma;
+    if (sorted_keys[first] == sorted_keys[last]) {
+        // All Morton codes in the range are identical; split in the middle.
+        gamma = (first + last) / 2;
+    } else {
+        int delta_node = delta(first, last);
+        int s    = 0;
+        int step = last - first;
+        do {
+            step = (step + 1) / 2;
+            if (first + s + step < last && delta(first, first + s + step) > delta_node)
+                s += step;
+        } while (step > 1);
+        gamma = first + s;
+    }
+
+    // ── Assign children ───────────────────────────────────────────────────────
+    // Leaf nodes start at index (n-1) in the node array.
+    int left_child  = (first    == gamma    ) ? int(n) - 1 + gamma     : gamma;
+    int right_child = (last     == gamma + 1) ? int(n) - 1 + gamma + 1 : gamma + 1;
+
+    nodes[i].left       = left_child;
+    nodes[i].right      = right_child;
+    nodes[i].object_id  = -1;
+
+    nodes[left_child].parent  = i;
+    nodes[right_child].parent = i;
+
+    // Root has no parent.
+    if (i == 0) nodes[0].parent = -1;
+}
