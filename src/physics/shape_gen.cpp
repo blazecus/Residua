@@ -176,3 +176,79 @@ std::vector<glm::vec2> generate_shape(
     if (ms.size() == 0) return {};
     return douglas_peucker(ms, epsilon);
 }
+
+// ─── Ear-Clipping Triangulation ───────────────────────────────────────────────
+
+static float cross2d(glm::vec2 o, glm::vec2 a, glm::vec2 b)
+{
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+
+static bool point_in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c)
+{
+    float d1 = cross2d(a, b, p);
+    float d2 = cross2d(b, c, p);
+    float d3 = cross2d(c, a, p);
+    bool has_neg = (d1 < 0.f) || (d2 < 0.f) || (d3 < 0.f);
+    bool has_pos = (d1 > 0.f) || (d2 > 0.f) || (d3 > 0.f);
+    return !(has_neg && has_pos);
+}
+
+std::vector<Triangle> triangulate(const std::vector<glm::vec2>& polygon)
+{
+    std::vector<Triangle> result;
+    size_t n = polygon.size();
+    if (n < 3) return result;
+
+    float signed_area = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        glm::vec2 a = polygon[i];
+        glm::vec2 b = polygon[(i + 1) % n];
+        signed_area += a.x * b.y - b.x * a.y;
+    }
+    float ear_sign = (signed_area >= 0.f) ? 1.f : -1.f;
+
+    std::vector<uint32_t> idx(n);
+    for (uint32_t i = 0; i < (uint32_t)n; i++) idx[i] = i;
+
+    result.reserve(n - 2);
+
+    int remaining = (int)n;
+    int i = 0;
+    int attempts = 0;
+
+    while (remaining > 3 && attempts < remaining) {
+        int prev = (i - 1 + remaining) % remaining;
+        int next = (i + 1) % remaining;
+
+        glm::vec2 va = polygon[idx[prev]];
+        glm::vec2 vb = polygon[idx[i]];
+        glm::vec2 vc = polygon[idx[next]];
+
+        if (cross2d(va, vb, vc) * ear_sign > 0.f) {
+            bool is_ear = true;
+            for (int j = 0; j < remaining && is_ear; j++) {
+                if (j == prev || j == i || j == next) continue;
+                if (point_in_triangle(polygon[idx[j]], va, vb, vc))
+                    is_ear = false;
+            }
+
+            if (is_ear) {
+                result.push_back({idx[prev], idx[i], idx[next]});
+                idx.erase(idx.begin() + i);
+                remaining--;
+                i = i % remaining;
+                attempts = 0;
+                continue;
+            }
+        }
+
+        i = (i + 1) % remaining;
+        attempts++;
+    }
+
+    if (remaining == 3)
+        result.push_back({idx[0], idx[1], idx[2]});
+
+    return result;
+}

@@ -23,3 +23,9 @@ std::vector<glm::vec2> generate_shape(
     float                     threshold = 0.5f,
     float                     epsilon   = 0.5f
 );
+
+struct Triangle {
+    uint32_t a, b, c;
+};
+
+std::vector<Triangle> triangulate(const std::vector<glm::vec2>& polygon);
