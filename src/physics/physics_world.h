@@ -1,36 +1,30 @@
 #pragma once
 
-#include "../physics/lbvh.h"
-#include "../physics/rigid_body.h"
-#include "../physics/collision.h"
-
-static constexpr float WARM_START_SCALE = 0.99f;
-
-struct ContactConstraint {
-    glm::vec2 position;  // world-space position, used to match against next frame
-    float     lambda_n;  // normal Lagrange multiplier
-    float     lambda_t;  // tangential Lagrange multiplier (friction)
-};
-
-struct CollisionPair {
-    uint32_t a, b;
-    std::vector<ManifoldPoint>     contacts;
-    std::vector<ContactConstraint> constraints;  // parallel to contacts, warm start state
-    float stiffness;                             // shared across all contacts in this pair
-};
+#include "lbvh.h"
+#include "rigid_body.h"
+#include "force.h"
+#include <memory>
+#include <vector>
 
 struct PhysicsWorld {
-    std::vector<RigidBody2> bodies;
-    std::vector<bool>       active;
-    std::vector<uint32_t>   open_slots;
+    // Simulation parameters
+    float gravity   { -10.f };
+    float alpha     { AVBD_ALPHA };
+    float beta      { AVBD_BETA  };
+    float gamma     { AVBD_GAMMA };
+    int   iterations{ 10 };
+    bool  postStabilize{ true };
 
-    LBVH                       lbvh;
-    std::vector<CollisionPair> collision_pairs;
+    std::vector<RigidBody2>  bodies;
+    std::vector<bool>        active;
+    std::vector<uint32_t>    open_slots;
 
-    glm::vec2 gravity{0.f, -9.8f};
+    std::vector<std::unique_ptr<Force>> forces;
 
-    uint32_t add_body(RigidBody2& new_body);
-    void     remove_body(uint32_t index);
+    LBVH lbvh;
+
+    uint32_t    add_body(RigidBody2& rb);
+    void        remove_body(uint32_t index);
     RigidBody2& get_body(uint32_t index);
 
     void step(float dt);

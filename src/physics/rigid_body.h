@@ -7,26 +7,26 @@
 
 struct RigidBody2 {
     LoadedBodyImage sprite;
-    std::vector<glm::vec2> shape;      // ordered outline from marching squares + DP
-    std::vector<Triangle>  triangles;  // ear-clipped decomposition of shape
+    std::vector<glm::vec2> shape;      
+    std::vector<Triangle>  triangles;  
     AABB unrotated_AABB;
 
-    glm::vec2 position;
-    glm::vec2 position_prev;
-    glm::vec2 velocity;
-    float rotation;
-    float rotation_prev;
-    float angular_velocity{0.f};
+    glm::vec3 position{0.f};
+    glm::vec3 initial{0.f};    
+    glm::vec3 inertial{0.f};   
+    glm::vec3 velocity{0.f};
+    glm::vec3 prev_velocity{0.f};
 
     float mass{1.f};
     float inertia{1.f};
     float inv_mass{1.f};
     float inv_inertia{1.f};
-
-    void compute_mass_properties(float density = 1.f);
+    float friction{0.3f};
 
     void generate_shape();
     void triangulate_shape();
+
+    void compute_mass_properties(float density = 1.f);
 
     void load_body(std::string& path);
 

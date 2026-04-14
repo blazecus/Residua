@@ -7,7 +7,7 @@
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 static glm::vec2 world_vert(const RigidBody2& rb, uint32_t vi) {
-    return rb.position + glm::rotate(rb.shape[vi], rb.rotation);
+    return glm::vec2(rb.position) + glm::rotate(rb.shape[vi], rb.position.z);
 }
 
 static std::pair<float, float> project_tri(const glm::vec2 v[3], glm::vec2 axis) {

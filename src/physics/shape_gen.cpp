@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <unordered_map>
 
 // ─── Marching Squares ─────────────────────────────────────────────────────────
 //
@@ -166,6 +167,86 @@ std::vector<glm::vec2> douglas_peucker(
     return result;
 }
 
+// ─── Segment stitching ────────────────────────────────────────────────────────
+
+// Quantise a vertex to a fixed-point key so that endpoints computed from
+// the same marching-squares interpolation compare equal.
+struct IVec2 {
+    int32_t x, y;
+    bool operator==(const IVec2& o) const { return x == o.x && y == o.y; }
+};
+struct IVec2Hash {
+    size_t operator()(const IVec2& k) const {
+        return std::hash<int32_t>()(k.x) ^ (std::hash<int32_t>()(k.y) * 2654435761u);
+    }
+};
+static IVec2 quantize(glm::vec2 p) {
+    // Scale by 1024 so that sub-pixel interpolated points get distinct keys.
+    return { (int32_t)std::round(p.x * 1024.f),
+             (int32_t)std::round(p.y * 1024.f) };
+}
+
+std::vector<std::vector<glm::vec2>> stitch_contours(
+    const std::vector<glm::vec2>& segments)
+{
+    size_t n = segments.size() / 2;
+    if (n == 0) return {};
+
+    // Build adjacency: endpoint key → list of (segment index, which end).
+    struct HalfEdge { size_t seg; bool is_a; };
+    std::unordered_map<IVec2, std::vector<HalfEdge>, IVec2Hash> adj;
+    adj.reserve(n * 2);
+    for (size_t i = 0; i < n; i++) {
+        adj[quantize(segments[i * 2    ])].push_back({i, true });
+        adj[quantize(segments[i * 2 + 1])].push_back({i, false});
+    }
+
+    std::vector<bool> used(n, false);
+    std::vector<std::vector<glm::vec2>> contours;
+
+    for (size_t start = 0; start < n; start++) {
+        if (used[start]) continue;
+
+        std::vector<glm::vec2> contour;
+        used[start] = true;
+        contour.push_back(segments[start * 2    ]);
+        contour.push_back(segments[start * 2 + 1]);
+
+        bool closed = false;
+        while (!closed) {
+            IVec2 tail_key = quantize(contour.back());
+
+            // Close the loop if the tail reaches the start.
+            if (contour.size() > 2 && tail_key == quantize(contour.front())) {
+                contour.pop_back();
+                closed = true;
+                break;
+            }
+
+            // Walk to the next unused segment connected to the tail.
+            auto it = adj.find(tail_key);
+            if (it == adj.end()) break;
+
+            bool found = false;
+            for (HalfEdge& he : it->second) {
+                if (used[he.seg]) continue;
+                used[he.seg] = true;
+                // Tail matches one end of this segment — append the other end.
+                contour.push_back(he.is_a ? segments[he.seg * 2 + 1]
+                                          : segments[he.seg * 2    ]);
+                found = true;
+                break;
+            }
+            if (!found) break;
+        }
+
+        if (contour.size() >= 3)
+            contours.push_back(std::move(contour));
+    }
+
+    return contours;
+}
+
 std::vector<glm::vec2> generate_shape(
     uint32_t width, uint32_t height,
     const std::vector<glm::vec4>& img,
@@ -173,8 +254,20 @@ std::vector<glm::vec2> generate_shape(
     float epsilon)
 {
     std::vector<glm::vec2> ms = marching_squares(width, height, img, threshold);
-    if (ms.size() == 0) return {};
-    return douglas_peucker(ms, epsilon);
+    if (ms.empty()) return {};
+
+    auto contours = stitch_contours(ms);
+    if (contours.empty()) return {};
+
+    // Simplify each contour with DP, then return the one with the most vertices
+    // (largest boundary = outer hull of the shape).
+    std::vector<glm::vec2> best;
+    for (auto& c : contours) {
+        auto simplified = douglas_peucker(c, epsilon);
+        if (simplified.size() > best.size())
+            best = std::move(simplified);
+    }
+    return best;
 }
 
 // ─── Ear-Clipping Triangulation ───────────────────────────────────────────────

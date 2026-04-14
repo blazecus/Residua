@@ -47,6 +47,9 @@ add_executable (Residua
   src/physics/rigid_body.h
   src/physics/collision.cpp
   src/physics/collision.h
+  src/physics/manifold.cpp
+  src/physics/manifold.h
+  src/physics/force.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
