@@ -34,10 +34,8 @@ add_executable (Residua
   src/renderer/vk_descriptors.h
   src/renderer/vk_pipelines.cpp
   src/renderer/vk_pipelines.h
-  src/physics/physics_engine.cpp
-  src/physics/physics_engine.h
-  src/physics/sdf_generator.cpp
-  src/physics/sdf_generator.h
+  src/physics/body_image.cpp
+  src/physics/body_image.h
   src/physics/lbvh.h
   src/physics/physics_world.cpp
   src/physics/physics_world.h
@@ -50,6 +48,8 @@ add_executable (Residua
   src/physics/manifold.cpp
   src/physics/manifold.h
   src/physics/force.h
+  src/physics/cpu_draw_system.cpp
+  src/physics/cpu_draw_system.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)

@@ -73,10 +73,16 @@ std::vector<glm::vec2> marching_squares(
     std::vector<Seg> segs;
     segs.reserve((width + height) * 2);
 
-    auto v = [&](uint32_t x, uint32_t y) { return img[y * width + x].w; };
+    // Pixels outside the image are treated as transparent (0).
+    // This ensures solid pixels at the image boundary generate proper edge segments.
+    auto v = [&](int x, int y) -> float {
+        if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) return 0.f;
+        return img[y * width + x].w;
+    };
 
-    for (uint32_t row = 0; row + 1 < height; row++) {
-        for (uint32_t col = 0; col + 1 < width; col++) {
+    // Iterate over a virtual padded grid: one extra cell on every side.
+    for (int row = -1; row < (int)height; row++) {
+        for (int col = -1; col < (int)width; col++) {
             float vTL = v(col,   row);
             float vTR = v(col+1, row);
             float vBR = v(col+1, row+1);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "physics_engine.h"
+#include <glm/glm.hpp>
 #include <vector>
 #include <array>
 #include <limits>
@@ -57,9 +57,8 @@ inline AABB AABB_offset(const AABB& box, float offset){
 }
 
 inline bool AABB_intersects(const AABB& a, const AABB& b) {
-    glm::vec2 min = glm::min(a.min, b.min);
-    glm::vec2 max = glm::max(a.max, b.max);
-    return min.x < max.x && min.y < max.y;
+    return a.max.x > b.min.x && b.max.x > a.min.x &&
+           a.max.y > b.min.y && b.max.y > a.min.y;
 }
 
 inline bool AABB_contains_point(const AABB& box, glm::vec2 p){
@@ -149,7 +148,7 @@ inline void lbvh_build(LBVH& lbvh, std::vector<AABB>& boxes) {
 
     build_recurse = [&](int first, int last) -> std::pair<int,AABB> {
         if (first == last) {
-            return {-lbvh.sorted[first]-1, lbvh.boxes[lbvh.sorted[first]]};
+            return {-first-1, lbvh.boxes[lbvh.sorted[first]]};
         }
 
         // find split

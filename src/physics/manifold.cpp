@@ -50,7 +50,7 @@ bool Manifold::initialize() {
     for (int i = 0; i < numContacts; i++) {
         const ManifoldPoint& mp = pts[i];
 
-        // rA/rB in body-local space 
+        // rA/rB in body-local space
         contacts[i].rA     = glm::rotate(mp.position - glm::vec2(ba.position), -ba.position.z);
         contacts[i].rB     = glm::rotate(mp.position - glm::vec2(bb.position), -bb.position.z);
         contacts[i].normal = mp.normal;
@@ -79,6 +79,10 @@ bool Manifold::initialize() {
     }
 
     // Precompute Jacobians and baseline constraint C0 at x⁻ (current position before prediction).
+    // Convention: C_n >= 0 means non-penetrating (gap >= 0).
+    //   C_n = -depth + margin + JAn*dpA + JBn*dpB
+    //   JAn = -n  (A moving in +n direction decreases the gap)
+    //   JBn = +n  (B moving in +n direction increases the gap)
     for (int i = 0; i < numContacts; i++) {
         glm::vec2 n = contacts[i].normal;
         glm::vec2 t = { n.y, -n.x };  // tangent
@@ -86,13 +90,15 @@ bool Manifold::initialize() {
         glm::vec2 rAW = glm::rotate(contacts[i].rA, ba.position.z);
         glm::vec2 rBW = glm::rotate(contacts[i].rB, bb.position.z);
 
-        contacts[i].JAn = {  n.x,  n.y,  rAW.x * n.y - rAW.y * n.x };
-        contacts[i].JBn = { -n.x, -n.y, -(rBW.x * n.y - rBW.y * n.x) };
-        contacts[i].JAt = {  t.x,  t.y,  rAW.x * t.y - rAW.y * t.x };
-        contacts[i].JBt = { -t.x, -t.y, -(rBW.x * t.y - rBW.y * t.x) };
+        contacts[i].JAn = { -n.x, -n.y, -(rAW.x * n.y - rAW.y * n.x) };
+        contacts[i].JBn = {  n.x,  n.y,   rBW.x * n.y - rBW.y * n.x  };
+        contacts[i].JAt = { -t.x, -t.y, -(rAW.x * t.y - rAW.y * t.x) };
+        contacts[i].JBt = {  t.x,  t.y,   rBW.x * t.y - rBW.y * t.x  };
 
+        // C0.x = actual signed gap (negative = penetrating).
+        // C0.y = tangential offset between the two contact-point anchors.
         glm::vec2 sep = glm::vec2(ba.position) + rAW - glm::vec2(bb.position) - rBW;
-        contacts[i].C0 = { glm::dot(sep, n) + COLLISION_MARGIN, glm::dot(sep, t) };
+        contacts[i].C0 = { -pts[i].depth + COLLISION_MARGIN, glm::dot(sep, t) };
     }
 
     return numContacts > 0;

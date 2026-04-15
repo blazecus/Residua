@@ -17,7 +17,7 @@
 #include "vk_descriptors.h"
 #include "vk_pipelines.h"
 
-#include "../physics/physics_engine.h"
+#include "../physics/cpu_draw_system.h"
 
 #include <vk_mem_alloc.h>
 #include <chrono>
@@ -188,7 +188,7 @@ public:
 
     bool resize_requested { false };
 
-    PhysicsPipeline* physics { nullptr };
+    CPUDrawSystem*   cpu_physics { nullptr };
     float _dt { 0.016f };
     bool freeze_rendering { false };
 

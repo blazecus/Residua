@@ -125,8 +125,8 @@ void ResiduaEngine::cleanup()
 
 void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 {
-	if (physics) {
-		physics->dispatch(cmd, _dt);
+	if (cpu_physics) {
+		cpu_physics->dispatch(cmd, _dt);
 		return;
 	}
 
@@ -194,11 +194,12 @@ void ResiduaEngine::draw()
 
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	if (physics) {
-		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-		vkutil::copy_image_to_image(cmd, physics->output_screen.image, _swapchainImages[swapchainImageIndex],
+	AllocatedImage* phys_out = cpu_physics ? &cpu_physics->output_screen : nullptr;
+	if (phys_out) {
+		vkutil::transition_image(cmd, phys_out->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		vkutil::copy_image_to_image(cmd, phys_out->image, _swapchainImages[swapchainImageIndex],
 			{ PHYSICS_WIDTH, PHYSICS_HEIGHT }, _swapchainExtent);
-		vkutil::transition_image(cmd, physics->output_screen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		vkutil::transition_image(cmd, phys_out->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	} else {
 		vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
@@ -286,26 +287,14 @@ void ResiduaEngine::draw_frame() {
 
 	ImGui::Begin("Stats");
 
+    auto physics_stats = cpu_physics->get_stats();
 	ImGui::Text("frametime %f ms", stats.frametime);
-	ImGui::Text("drawtime %f ms", stats.mesh_draw_time);
-	ImGui::Text("triangles %i", stats.triangle_count);
-	ImGui::Text("draws %i", stats.drawcall_count);
+	ImGui::Text("lbvh build %f ms", physics_stats.lbvh_ms);
+	ImGui::Text("broadphase %f ms", physics_stats.broadphase_ms);
+	ImGui::Text("warm start %f ms", physics_stats.warmstart_ms);
+	ImGui::Text("solver %f ms", physics_stats.solver_ms);
+	ImGui::Text("bodies %u", physics_stats.num_bodies);
 	ImGui::End();
-
-	if (ImGui::Begin("background")) {
-		ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-
-		ImGui::Text("Selected effect: ", selected.name);
-
-		ImGui::SliderInt("Effect Index", &currentBackgroundEffect, 0, backgroundEffects.size() - 1);
-
-		ImGui::InputFloat4("data1", (float*)&selected.data.data1);
-		ImGui::InputFloat4("data2", (float*)&selected.data.data2);
-		ImGui::InputFloat4("data3", (float*)&selected.data.data3);
-		ImGui::InputFloat4("data4", (float*)&selected.data.data4); 
-
-		ImGui::End();
-	}
 
 	ImGui::Render();
 

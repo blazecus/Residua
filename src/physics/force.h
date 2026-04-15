@@ -72,7 +72,7 @@ struct PhysicsWorld;
 
 struct Force {
     PhysicsWorld* world;
-    uint32_t bodyA, bodyB; 
+    uint32_t bodyA, bodyB;
 
     glm::vec3 J[AVBD_MAX_ROWS]{};
     Mat3      H[AVBD_MAX_ROWS]{};

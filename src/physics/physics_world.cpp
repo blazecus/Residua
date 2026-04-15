@@ -3,6 +3,7 @@
 #include <glm/gtx/rotate_vector.hpp>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,28 @@ void PhysicsWorld::remove_body(uint32_t index) {
         forces.end());
 }
 
+uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
+    RigidBody2 rb;
+    rb.position    = glm::vec3(center, 0.f);
+    rb.inv_mass    = 0.f;
+    rb.inv_inertia = 0.f;
+    rb.mass        = 0.f;
+    rb.inertia     = 0.f;
+
+    float hw = w * 0.5f, hh = h * 0.5f;
+    rb.shape = {
+        { -hw, -hh },
+        {  hw, -hh },
+        {  hw,  hh },
+        { -hw,  hh },
+    };
+    rb.triangles = {
+        { 0, 1, 2 },
+        { 0, 2, 3 },
+    };
+    return add_body(rb);
+}
+
 RigidBody2& PhysicsWorld::get_body(uint32_t index) {
     return bodies[index];
 }
@@ -76,6 +99,13 @@ RigidBody2& PhysicsWorld::get_body(uint32_t index) {
 // ─── Step ─────────────────────────────────────────────────────────────────────
 
 void PhysicsWorld::step(float dt) {
+    std::chrono::microseconds elapsed{ 0 };
+    auto start = std::chrono::system_clock::now();
+
+    stats.num_bodies = 0;
+    for (uint32_t i = 0; i < (uint32_t)active.size(); i++)
+        if (active[i]) stats.num_bodies++;
+
     // 1. Build LBVH from world-space AABBs of active bodies.
     std::vector<AABB>     boxes;
     std::vector<uint32_t> index_map;
@@ -86,6 +116,10 @@ void PhysicsWorld::step(float dt) {
         index_map.push_back(i);
     }
     lbvh_build(lbvh, boxes);
+
+    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
+	stats.lbvh_ms = elapsed.count() / 1000.f;
+    start = std::chrono::system_clock::now(); 
 
     // 2. Broad phase: create a Manifold for each new overlapping body pair.
     std::vector<int> candidates;
@@ -99,6 +133,11 @@ void PhysicsWorld::step(float dt) {
                 forces.push_back(std::make_unique<Manifold>(this, i, j));
         }
     }
+
+
+    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
+	stats.broadphase_ms = elapsed.count() / 1000.f;
+    start = std::chrono::system_clock::now();
 
     // 3. Warm-start forces (dual variables: lambda, penalty).
     for (auto& f : forces) {
@@ -140,6 +179,10 @@ void PhysicsWorld::step(float dt) {
         if (rb.inv_mass > 0.f)
             rb.position += glm::vec3(0.f, gravity, 0.f) * (accelWeight * dt * dt);
     }
+
+    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
+	stats.warmstart_ms = elapsed.count() / 1000.f;
+    start = std::chrono::system_clock::now();
 
     // 5. Main solver loop.
     int totalIterations = iterations + (postStabilize ? 1 : 0);
@@ -207,4 +250,7 @@ void PhysicsWorld::step(float dt) {
             }
         }
     }
+
+    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
+	stats.solver_ms = elapsed.count() / 1000.f;
 }

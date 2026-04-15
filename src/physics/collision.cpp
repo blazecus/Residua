@@ -1,7 +1,7 @@
 #include "collision.h"
 #include <glm/gtx/rotate_vector.hpp>
 #include <algorithm>
-#include <array>
+#include <iostream>
 #include <limits>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -62,59 +62,24 @@ static SATResult sat_triangles(const glm::vec2 a[3], const glm::vec2 b[3]) {
 
 // ─── Contact point generation ─────────────────────────────────────────────────
 
-static std::vector<glm::vec2> clip(
-    const std::vector<glm::vec2>& poly, glm::vec2 n, float d)
-{
-    std::vector<glm::vec2> out;
-    for (size_t i = 0; i < poly.size(); i++) {
-        glm::vec2 curr = poly[i];
-        glm::vec2 next = poly[(i + 1) % poly.size()];
-        float dc = glm::dot(curr, n) - d;
-        float dn = glm::dot(next, n) - d;
-        if (dc >= 0.f) out.push_back(curr);
-        if ((dc >= 0.f) != (dn >= 0.f)) {
-            float t = dc / (dc - dn);
-            out.push_back(curr + t * (next - curr));
-        }
-    }
-    return out;
-}
-
-static std::pair<int, int> best_edge(const glm::vec2 verts[3], glm::vec2 dir) {
-    float best = -std::numeric_limits<float>::max();
-    int   bi   = 0;
-    for (int i = 0; i < 3; i++) {
-        glm::vec2 edge = verts[(i + 1) % 3] - verts[i];
-        glm::vec2 en   = glm::normalize(glm::vec2(-edge.y, edge.x));
-        float     d    = glm::dot(en, dir);
-        if (d > best) { best = d; bi = i; }
-    }
-    return { bi, (bi + 1) % 3 };
-}
-
 // Generate contact points for one penetrating triangle pair and append to `out`.
+// Uses the support-point of A along the SAT normal as the depth reference so that
+// the result is independent of how A is triangulated (avoids the "diagonal edge"
+// mis-classification that occurs when A is a rectangle split into two triangles).
 static void contact_points(
     const glm::vec2 a[3], const glm::vec2 b[3],
     glm::vec2 normal, std::vector<ManifoldPoint>& out)
 {
-    auto [ri0, ri1] = best_edge(a, normal);
-    glm::vec2 ref0 = a[ri0], ref1 = a[ri1];
-    glm::vec2 ref_edge_dir = glm::normalize(ref1 - ref0);
-    glm::vec2 ref_normal   = glm::vec2(-ref_edge_dir.y, ref_edge_dir.x);
-    float     ref_d        = glm::dot(ref_normal, ref0);
+    // A's support point in the direction of normal (the surface of A most facing B).
+    float support = -1e20f;
+    for (int i = 0; i < 3; i++)
+        support = std::max(support, glm::dot(a[i], normal));
 
-    auto [ii0, ii1] = best_edge(b, -normal);
-    std::vector<glm::vec2> incident = { b[ii0], b[ii1] };
-
-    incident = clip(incident,  ref_edge_dir, glm::dot( ref_edge_dir, ref0));
-    if (incident.empty()) return;
-    incident = clip(incident, -ref_edge_dir, glm::dot(-ref_edge_dir, ref1));
-    if (incident.empty()) return;
-
-    for (glm::vec2 p : incident) {
-        float depth = ref_d - glm::dot(ref_normal, p);
-        if (depth >= 0.f)
-            out.push_back({ p, normal, depth });
+    // Each vertex of B that lies past A's support plane is a contact.
+    for (int i = 0; i < 3; i++) {
+        float depth = support - glm::dot(b[i], normal);
+        if (depth > 0.f)
+            out.push_back({ b[i], normal, depth });
     }
 }
 

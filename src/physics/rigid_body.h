@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../physics/physics_engine.h"
+#include "../physics/body_image.h"
 #include "../physics/lbvh.h"
 #include "../physics/shape_gen.h"
 #include <string>

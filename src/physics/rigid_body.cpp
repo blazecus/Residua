@@ -14,6 +14,10 @@ AABB RigidBody2::generate_AABB() {
 
 void RigidBody2::generate_shape() {
     shape = ::generate_shape(sprite.width, sprite.height, sprite.pixels);
+    // Center vertices around origin to match the draw-shader convention.
+    glm::vec2 half(sprite.width * 0.5f, sprite.height * 0.5f);
+    for (auto& v : shape)
+        v -= half;
 }
 
 void RigidBody2::triangulate_shape() {
