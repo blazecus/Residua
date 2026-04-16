@@ -2,7 +2,7 @@
 
 #include <src/game/client.h>
 #include <src/renderer/residua_engine.h>
-#include <src/physics/cpu_draw_system.h>
+#include <src/physics/physics_engine.h>
 #include <src/physics/body_image.h>
 #include <chrono>
 
@@ -15,7 +15,7 @@ public:
     SDL_Cursor* cursor;
 
     ResiduaEngine  engine;
-    CPUDrawSystem  cpu_physics;
+    PhysicsEngine  cpu_physics;
 
     bool freeze_rendering{ false };
     bool fpsLimit = true;

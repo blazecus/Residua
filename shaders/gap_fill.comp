@@ -1,27 +1,18 @@
 // gap_fill.comp
+//
+// Fills single-pixel gaps between body sprites by averaging neighboring pixel colors.
+// A pixel is filled if it is empty (alpha == 0) and has more than 2 filled cardinal neighbors.
 
 #version 460
-#extension GL_GOOGLE_include_directive : require
-#include "physics_types.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// ─── Bindings ─────────────────────────────────────────────────────────────────
-
 layout(rgba16f, set = 0, binding = 0) uniform image2D output_image;
-
-layout(set = 0, binding = 1) buffer CollisionBuffer {
-    CollisionPixel collision_pixels[];
-};
-
-// ─── Push constants ───────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
 };
-
-// ─── Main ─────────────────────────────────────────────────────────────────────
 
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -31,46 +22,16 @@ void main() {
     vec4  color_sum   = vec4(0.0);
     float color_count = 0.0;
 
-    uint first_id    = COLLISION_EMPTY;
-    uint first_count = 0u;
-    uint second_id   = COLLISION_EMPTY;
-    uint second_count = 0u;
-
     const ivec2 cardinals[4] = {ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1)};
-
     for (uint i = 0; i < 4; i++) {
         ivec2 nc = coord + cardinals[i];
         if (nc.x < 0 || nc.y < 0 || nc.x >= int(width) || nc.y >= int(height)) continue;
-
         vec4 nb = imageLoad(output_image, nc);
         if (nb.a <= 0.0) continue;
-
         color_sum   += nb;
         color_count += 1.0;
-
-        uint nb_id = collision_pixels[uint(nc.y) * width + uint(nc.x)].body_id;
-
-        if (nb_id == first_id) {
-            first_count++;
-        } else if (nb_id == second_id) {
-            second_count++;
-        } else if (first_count == 0u) {
-            first_id = nb_id; first_count = 1u;
-        } else if (second_count == 0u) {
-            second_id = nb_id; second_count = 1u;
-        } else {
-            return; 
-        }
     }
 
     if (color_count <= 2.0) return;
-
-    uint fill_id = (first_count >= second_count) ? first_id : second_id;
-    if (fill_id == COLLISION_EMPTY || fill_id == COLLISION_STATIC) return;
-
     imageStore(output_image, coord, color_sum / color_count);
-
-    uint dst_idx = uint(coord.y) * width + uint(coord.x);
-    collision_pixels[dst_idx].body_id  = fill_id;
-    collision_pixels[dst_idx].body_id2 = COLLISION_EMPTY;
 }

@@ -40,7 +40,7 @@ void Game::init() {
 }
 
 // Helper: build a RigidBody2 from a loaded image and spawn it at world_pos.
-static void spawn_body(CPUDrawSystem& cpu, ResiduaEngine& engine,
+static void spawn_body(PhysicsEngine& cpu, ResiduaEngine& engine,
                        const LoadedBodyImage& img, glm::vec2 world_pos)
 {
     RigidBody2 rb;

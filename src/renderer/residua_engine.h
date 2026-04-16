@@ -17,7 +17,7 @@
 #include "vk_descriptors.h"
 #include "vk_pipelines.h"
 
-#include "../physics/cpu_draw_system.h"
+#include "../physics/physics_engine.h"
 
 #include <vk_mem_alloc.h>
 #include <chrono>
@@ -41,22 +41,6 @@ struct DeletionQueue {
     }
 };
 
-struct ComputePushConstants {
-    glm::vec4 data1;
-    glm::vec4 data2;
-    glm::vec4 data3;
-    glm::vec4 data4;
-    glm::vec2 playerPos;
-};
-
-struct ComputeEffect {
-    const char* name;
-
-    VkPipeline pipeline;
-    VkPipelineLayout layout;
-
-    ComputePushConstants data;
-};
 
 struct FrameData {
     VkSemaphore _swapchainSemaphore, _renderSemaphore;
@@ -116,20 +100,12 @@ public:
 
     DescriptorAllocator globalDescriptorAllocator;
 
-    VkPipeline _gradientPipeline;
-    VkPipelineLayout _gradientPipelineLayout;
-
-    std::vector<VkImage> _swapchainImages;
+std::vector<VkImage> _swapchainImages;
     std::vector<VkImageView> _swapchainImageViews;
-
-    VkDescriptorSet _drawImageDescriptors;
-    VkDescriptorSetLayout _drawImageDescriptorLayout;
 
     DeletionQueue _mainDeletionQueue;
 
     VmaAllocator _allocator; // vma lib allocator
-
-    VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
 
     // draw resources
     AllocatedImage _drawImage;
@@ -147,10 +123,7 @@ public:
     VkSampler _defaultSamplerLinear;
     VkSampler _defaultSamplerNearest;
 
-    std::vector<ComputeEffect> backgroundEffects;
-    int currentBackgroundEffect{ 0 };
-
-    TextureCache texCache;
+TextureCache texCache;
 
     EngineStats stats;
 
@@ -171,8 +144,6 @@ public:
     void draw_main(VkCommandBuffer cmd);
     void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 
-    void update_scene();
-
     FrameData& get_current_frame();
     FrameData& get_last_frame();
 
@@ -188,7 +159,7 @@ public:
 
     bool resize_requested { false };
 
-    CPUDrawSystem*   cpu_physics { nullptr };
+    PhysicsEngine*   cpu_physics { nullptr };
     float _dt { 0.016f };
     bool freeze_rendering { false };
 

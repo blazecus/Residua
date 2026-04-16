@@ -17,12 +17,10 @@ static std::pair<float, float> project_tri(const glm::vec2 v[3], glm::vec2 axis)
     return { std::min({d0, d1, d2}), std::max({d0, d1, d2}) };
 }
 
-// ─── SAT ──────────────────────────────────────────────────────────────────────
-
 struct SATResult {
     bool      separated;
     float     depth;
-    glm::vec2 normal;  // from A toward B
+    glm::vec2 normal; 
 };
 
 static SATResult sat_triangles(const glm::vec2 a[3], const glm::vec2 b[3]) {
@@ -60,12 +58,6 @@ static SATResult sat_triangles(const glm::vec2 a[3], const glm::vec2 b[3]) {
     return { false, min_depth, best_normal };
 }
 
-// ─── Contact point generation ─────────────────────────────────────────────────
-
-// Generate contact points for one penetrating triangle pair and append to `out`.
-// Uses the support-point of A along the SAT normal as the depth reference so that
-// the result is independent of how A is triangulated (avoids the "diagonal edge"
-// mis-classification that occurs when A is a rectangle split into two triangles).
 static void contact_points(
     const glm::vec2 a[3], const glm::vec2 b[3],
     glm::vec2 normal, std::vector<ManifoldPoint>& out)

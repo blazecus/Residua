@@ -48,8 +48,8 @@ add_executable (Residua
   src/physics/manifold.cpp
   src/physics/manifold.h
   src/physics/force.h
-  src/physics/cpu_draw_system.cpp
-  src/physics/cpu_draw_system.h
+  src/physics/physics_engine.cpp
+  src/physics/physics_engine.h
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)

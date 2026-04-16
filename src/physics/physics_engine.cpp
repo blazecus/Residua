@@ -1,4 +1,4 @@
-#include "cpu_draw_system.h"
+#include "physics_engine.h"
 #include "../renderer/residua_engine.h"
 #include "../renderer/vk_images.h"
 #include "../renderer/vk_pipelines.h"
@@ -34,9 +34,7 @@ static VkPipeline make_compute_pipeline(VkDevice device, const char* spv,
     return pipeline;
 }
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-
-void CPUDrawSystem::grow_buffers(ResiduaEngine* engine,
+void PhysicsEngine::grow_buffers(ResiduaEngine* engine,
                                   uint32_t needed_bodies, uint32_t needed_pixels)
 {
     uint32_t new_cap_bodies = std::max(cap_bodies, 16u);
@@ -74,13 +72,11 @@ void CPUDrawSystem::grow_buffers(ResiduaEngine* engine,
                         next_pixel * sizeof(glm::vec4));
     }
 
-    // Rebind the draw descriptor set to the new buffers.
     DescriptorWriter w;
-    w.write_buffer(0, new_rb_buf.buffer,       new_cap_bodies * sizeof(RigidBodyDrawGPU),          0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-    w.write_buffer(1, new_pixel_buf.buffer,    new_cap_pixels * sizeof(glm::vec4),                 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-    w.write_image (2, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    w.write_buffer(3, collision_buf.buffer,    PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-    w.write_buffer(4, new_active_buf.buffer,   new_cap_bodies * sizeof(uint32_t),                  0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    w.write_buffer(0, new_rb_buf.buffer,       new_cap_bodies * sizeof(RigidBodyDrawGPU), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    w.write_buffer(1, new_pixel_buf.buffer,    new_cap_pixels * sizeof(glm::vec4),        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    w.write_image (2, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    w.write_buffer(3, new_active_buf.buffer,   new_cap_bodies * sizeof(uint32_t),         0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     w.update_set(engine->_device, draw_desc);
 
     if (bodies_grew && cap_bodies > 0) {
@@ -97,16 +93,9 @@ void CPUDrawSystem::grow_buffers(ResiduaEngine* engine,
     cap_pixels         = new_cap_pixels;
 }
 
-void CPUDrawSystem::init(ResiduaEngine* engine)
+void PhysicsEngine::init(ResiduaEngine* engine)
 {
     VkDevice device = engine->_device;
-
-    // ── Fixed-size GPU buffers ───────────────────────────────────────────────
-
-    collision_buf = engine->create_buffer(
-        PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
 
     // ── Output image ─────────────────────────────────────────────────────────
 
@@ -137,12 +126,10 @@ void CPUDrawSystem::init(ResiduaEngine* engine)
         b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rb_draw_buf
         b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // pixel_colors_buf
         b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_screen
-        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // collision_buf
-        b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices_buf
+        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices_buf
         pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
 
-        // body_count(u32) + physics_width(u32) = 8 bytes
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 2 };
+        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
         VkPipelineLayoutCreateInfo li {
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount         = 1,
@@ -152,23 +139,20 @@ void CPUDrawSystem::init(ResiduaEngine* engine)
         };
         VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
         pl.pipeline = make_compute_pipeline(device,
-            "../shaders/rigidbody_draw_cpu.comp.spv", pl.layout);
+            "../shaders/rigidbody_draw.comp.spv", pl.layout);
 
         draw_desc = desc_allocator.allocate(device, pl.desc_layout);
     }
 
-    // Initial buffer allocation — grow_buffers also writes the draw descriptor set.
     grow_buffers(engine, 16, 1 << 16);
 
     // ── Gap-fill pipeline ─────────────────────────────────────────────────────
     {
         auto& pl = gap_fill_pl;
         DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_screen
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // collision_buf
+        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE); // output_screen
         pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
 
-        // width(u32) + height(u32) = 8 bytes
         VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 2 };
         VkPipelineLayoutCreateInfo li {
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -183,31 +167,24 @@ void CPUDrawSystem::init(ResiduaEngine* engine)
 
         gap_fill_desc = desc_allocator.allocate(device, pl.desc_layout);
 
-        const size_t col_size = PHYSICS_WIDTH * PHYSICS_HEIGHT * sizeof(CollisionPixel);
         DescriptorWriter w;
-        w.write_image (0, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        w.write_buffer(1, collision_buf.buffer,    col_size,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_image(0, output_screen.imageView, VK_NULL_HANDLE,
+                      VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         w.update_set(device, gap_fill_desc);
     }
 
-    // Register cleanup with the engine's deletion queue.
     engine->_mainDeletionQueue.push_function([this, device]() {
-        vkDestroyPipeline(device, draw_pl.pipeline,     nullptr);
-        vkDestroyPipeline(device, gap_fill_pl.pipeline, nullptr);
-
-        vkDestroyPipelineLayout(device, draw_pl.layout,     nullptr);
-        vkDestroyPipelineLayout(device, gap_fill_pl.layout, nullptr);
-
+        vkDestroyPipeline(device, draw_pl.pipeline,      nullptr);
+        vkDestroyPipeline(device, gap_fill_pl.pipeline,  nullptr);
+        vkDestroyPipelineLayout(device, draw_pl.layout,      nullptr);
+        vkDestroyPipelineLayout(device, gap_fill_pl.layout,  nullptr);
         vkDestroyDescriptorSetLayout(device, draw_pl.desc_layout,     nullptr);
         vkDestroyDescriptorSetLayout(device, gap_fill_pl.desc_layout, nullptr);
-
         desc_allocator.destroy_pool(device);
     });
 }
 
-// ─── Add / remove bodies ──────────────────────────────────────────────────────
-
-uint32_t CPUDrawSystem::add_body(ResiduaEngine* engine, RigidBody2 body)
+uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
 {
     const uint32_t w = body.sprite.width;
     const uint32_t h = body.sprite.height;
@@ -216,19 +193,16 @@ uint32_t CPUDrawSystem::add_body(ResiduaEngine* engine, RigidBody2 body)
     const uint32_t pixel_offset = next_pixel;
     next_pixel += n;
 
-    // Grow GPU buffers before writing if capacity would be exceeded.
     uint32_t slot = world.add_body(body);
     grow_buffers(engine,
         (uint32_t)world.bodies.size(),
         next_pixel);
 
-    // Grow body_draw_info to cover the new slot.
     if (slot >= (uint32_t)body_draw_info.size())
         body_draw_info.resize(slot + 1);
 
     body_draw_info[slot] = { pixel_offset, w, h };
 
-    // Write pixel colors directly into the CPU-visible buffer.
     const size_t byte_size = n * sizeof(glm::vec4);
     auto* dst = static_cast<glm::vec4*>(pixel_colors_buf.info.pMappedData);
     std::memcpy(dst + pixel_offset, body.sprite.pixels.data(), byte_size);
@@ -236,28 +210,23 @@ uint32_t CPUDrawSystem::add_body(ResiduaEngine* engine, RigidBody2 body)
     return slot;
 }
 
-void CPUDrawSystem::remove_body(uint32_t idx)
+void PhysicsEngine::remove_body(uint32_t idx)
 {
     world.remove_body(idx);
-    // Pixel data in pixel_colors_buf is not reclaimed; the slot is simply inactive.
 }
 
-// ─── Body query ───────────────────────────────────────────────────────────────
-
-std::optional<uint32_t> CPUDrawSystem::body_at(glm::vec2 world_pos) const
+std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
 {
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
         const RigidBody2&   rb  = world.bodies[i];
         const BodyDrawInfo& bdi = body_draw_info[i];
 
-        // Rotate query into body-local space.
         glm::vec2 delta = world_pos - glm::vec2(rb.position);
         float c = std::cos(-rb.position.z), s = std::sin(-rb.position.z);
         glm::vec2 local = { c * delta.x - s * delta.y,
                             s * delta.x + c * delta.y };
 
-        // Shift to pixel coords (sprite is centered at body.position).
         local += glm::vec2((float)bdi.body_w, (float)bdi.body_h) * 0.5f - 0.5f;
 
         int px = (int)std::floor(local.x), py = (int)std::floor(local.y);
@@ -270,9 +239,7 @@ std::optional<uint32_t> CPUDrawSystem::body_at(glm::vec2 world_pos) const
     return std::nullopt;
 }
 
-// ─── Per-frame dispatch ───────────────────────────────────────────────────────
-
-void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
+void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
 {
     // 1. Step the CPU physics simulation.
     world.step(dt);
@@ -284,7 +251,6 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
 
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
-        // Static bodies added directly to world have no draw info — skip.
         if (i >= (uint32_t)body_draw_info.size()) continue;
         const BodyDrawInfo& bdi = body_draw_info[i];
         if (bdi.body_w == 0 || bdi.body_h == 0) continue;
@@ -306,7 +272,7 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
 
     if (active_count == 0) return;
 
-    // 3. Clear output_screen and collision_buf.
+    // 3. Clear output_screen.
     VkClearColorValue clear_color{};
     VkImageSubresourceRange full_range {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -315,19 +281,8 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
     };
     vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL,
                          &clear_color, 1, &full_range);
-    vkCmdFillBuffer(cmd, collision_buf.buffer, 0, VK_WHOLE_SIZE, 0);
 
     // 4. Barrier: clear → draw compute.
-    VkBufferMemoryBarrier2 col_clear_barrier {
-        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-        .buffer        = collision_buf.buffer,
-        .offset        = 0,
-        .size          = VK_WHOLE_SIZE,
-    };
     VkImageMemoryBarrier2 img_clear_barrier {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask     = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -340,36 +295,21 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
         .subresourceRange = full_range,
     };
     VkDependencyInfo dep1 {
-        .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers    = &col_clear_barrier,
-        .imageMemoryBarrierCount  = 1,
-        .pImageMemoryBarriers     = &img_clear_barrier,
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &img_clear_barrier,
     };
     vkCmdPipelineBarrier2(cmd, &dep1);
 
     // 5. Draw pass — one workgroup per active body.
-    struct { uint32_t body_count; uint32_t physics_width; } draw_pc {
-        active_count, PHYSICS_WIDTH
-    };
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, draw_pl.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         draw_pl.layout, 0, 1, &draw_desc, 0, nullptr);
     vkCmdPushConstants(cmd, draw_pl.layout,
-        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(draw_pc), &draw_pc);
+        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &active_count);
     vkCmdDispatch(cmd, active_count, 1, 1);
 
     // 6. Barrier: draw → gap_fill.
-    VkBufferMemoryBarrier2 col_draw_barrier {
-        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-        .buffer        = collision_buf.buffer,
-        .offset        = 0,
-        .size          = VK_WHOLE_SIZE,
-    };
     VkImageMemoryBarrier2 img_draw_barrier {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -382,11 +322,9 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
         .subresourceRange = full_range,
     };
     VkDependencyInfo dep2 {
-        .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers    = &col_draw_barrier,
-        .imageMemoryBarrierCount  = 1,
-        .pImageMemoryBarriers     = &img_draw_barrier,
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &img_draw_barrier,
     };
     vkCmdPipelineBarrier2(cmd, &dep2);
 
@@ -400,6 +338,6 @@ void CPUDrawSystem::dispatch(VkCommandBuffer cmd, float dt)
     vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
 }
 
-PhysicsStats CPUDrawSystem::get_stats(){
+PhysicsStats PhysicsEngine::get_stats(){
     return world.stats;
 }

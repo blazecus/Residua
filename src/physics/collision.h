@@ -4,9 +4,9 @@
 #include <vector>
 
 struct ManifoldPoint {
-    glm::vec2 position;  // world space contact point
-    glm::vec2 normal;    // unit vector from A into B, specific to this contact
-    float     depth;     // penetration depth (>= 0)
+    glm::vec2 position; 
+    glm::vec2 normal; 
+    float     depth; 
 };
 
 std::vector<ManifoldPoint> build_manifold(const RigidBody2& a, const RigidBody2& b);

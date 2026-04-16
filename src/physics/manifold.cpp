@@ -8,7 +8,6 @@
 Manifold::Manifold(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
     : Force(world, bodyA, bodyB)
 {
-    // Normal force: compressive only (fmax = 0, fmin = -INF) for each contact row
     for (int i = 0; i < MANIFOLD_MAX_CONTACTS; i++) {
         fmax[i * 2 + 0] = 0.f;
         fmin[i * 2 + 0] = -std::numeric_limits<float>::infinity();
@@ -78,11 +77,7 @@ bool Manifold::initialize() {
         }
     }
 
-    // Precompute Jacobians and baseline constraint C0 at x⁻ (current position before prediction).
-    // Convention: C_n >= 0 means non-penetrating (gap >= 0).
-    //   C_n = -depth + margin + JAn*dpA + JBn*dpB
-    //   JAn = -n  (A moving in +n direction decreases the gap)
-    //   JBn = +n  (B moving in +n direction increases the gap)
+    // Precompute Jacobians 
     for (int i = 0; i < numContacts; i++) {
         glm::vec2 n = contacts[i].normal;
         glm::vec2 t = { n.y, -n.x };  // tangent
@@ -95,8 +90,6 @@ bool Manifold::initialize() {
         contacts[i].JAt = { -t.x, -t.y, -(rAW.x * t.y - rAW.y * t.x) };
         contacts[i].JBt = {  t.x,  t.y,   rBW.x * t.y - rBW.y * t.x  };
 
-        // C0.x = actual signed gap (negative = penetrating).
-        // C0.y = tangential offset between the two contact-point anchors.
         glm::vec2 sep = glm::vec2(ba.position) + rAW - glm::vec2(bb.position) - rBW;
         contacts[i].C0 = { -pts[i].depth + COLLISION_MARGIN, glm::dot(sep, t) };
     }
