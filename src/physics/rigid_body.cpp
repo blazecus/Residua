@@ -20,8 +20,10 @@ void RigidBody2::generate_shape() {
         v -= half;
 }
 
-void RigidBody2::triangulate_shape() {
-    triangles = triangulate(shape);
+void RigidBody2::generate_sdf() {
+    sdf   = ::generate_sdf(sprite);
+    sdf_w = sprite.width;
+    sdf_h = sprite.height;
 }
 
 void RigidBody2::compute_mass_properties(float density) {

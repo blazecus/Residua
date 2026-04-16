@@ -4,6 +4,8 @@
 #include <cmath>
 #include <iostream>
 #include <unordered_map>
+#include <queue>
+#include <limits>
 
 // ─── Marching Squares ─────────────────────────────────────────────────────────
 //
@@ -276,78 +278,91 @@ std::vector<glm::vec2> generate_shape(
     return best;
 }
 
-// ─── Ear-Clipping Triangulation ───────────────────────────────────────────────
 
-static float cross2d(glm::vec2 o, glm::vec2 a, glm::vec2 b)
+static void bfs_distance(uint32_t w, uint32_t h,
+                          const std::vector<bool>& seed,
+                          std::vector<float>& out_dist)
 {
-    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-}
+    const float INF = std::numeric_limits<float>::max();
+    out_dist.assign(w * h, INF);
 
-static bool point_in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c)
-{
-    float d1 = cross2d(a, b, p);
-    float d2 = cross2d(b, c, p);
-    float d3 = cross2d(c, a, p);
-    bool has_neg = (d1 < 0.f) || (d2 < 0.f) || (d3 < 0.f);
-    bool has_pos = (d1 > 0.f) || (d2 > 0.f) || (d3 > 0.f);
-    return !(has_neg && has_pos);
-}
+    // dx/dy/dd for 8 neighbors
+    static const int   dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    static const int   dy[8] = {-1,-1,-1,  0, 0,  1, 1, 1};
+    static const float dd[8] = { 1.41421356f, 1.f, 1.41421356f,
+                                  1.f,         1.f,
+                                  1.41421356f, 1.f, 1.41421356f };
 
-std::vector<Triangle> triangulate(const std::vector<glm::vec2>& polygon)
-{
-    std::vector<Triangle> result;
-    size_t n = polygon.size();
-    if (n < 3) return result;
+    using Entry = std::pair<float, uint32_t>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq;
 
-    float signed_area = 0.f;
-    for (size_t i = 0; i < n; i++) {
-        glm::vec2 a = polygon[i];
-        glm::vec2 b = polygon[(i + 1) % n];
-        signed_area += a.x * b.y - b.x * a.y;
+    for (uint32_t i = 0; i < w * h; i++) {
+        if (seed[i]) {
+            out_dist[i] = 0.f;
+            pq.push({0.f, i});
+        }
     }
-    float ear_sign = (signed_area >= 0.f) ? 1.f : -1.f;
 
-    std::vector<uint32_t> idx(n);
-    for (uint32_t i = 0; i < (uint32_t)n; i++) idx[i] = i;
+    while (!pq.empty()) {
+        auto [d, idx] = pq.top(); pq.pop();
+        if (d > out_dist[idx]) continue;
 
-    result.reserve(n - 2);
+        int x = (int)(idx % w);
+        int y = (int)(idx / w);
 
-    int remaining = (int)n;
-    int i = 0;
-    int attempts = 0;
+        for (int k = 0; k < 8; k++) {
+            int nx = x + dx[k];
+            int ny = y + dy[k];
+            if (nx < 0 || ny < 0 || nx >= (int)w || ny >= (int)h) continue;
 
-    while (remaining > 3 && attempts < remaining) {
-        int prev = (i - 1 + remaining) % remaining;
-        int next = (i + 1) % remaining;
-
-        glm::vec2 va = polygon[idx[prev]];
-        glm::vec2 vb = polygon[idx[i]];
-        glm::vec2 vc = polygon[idx[next]];
-
-        if (cross2d(va, vb, vc) * ear_sign > 0.f) {
-            bool is_ear = true;
-            for (int j = 0; j < remaining && is_ear; j++) {
-                if (j == prev || j == i || j == next) continue;
-                if (point_in_triangle(polygon[idx[j]], va, vb, vc))
-                    is_ear = false;
-            }
-
-            if (is_ear) {
-                result.push_back({idx[prev], idx[i], idx[next]});
-                idx.erase(idx.begin() + i);
-                remaining--;
-                i = i % remaining;
-                attempts = 0;
-                continue;
+            uint32_t ni = (uint32_t)(ny * (int)w + nx);
+            float    nd = d + dd[k];
+            if (nd < out_dist[ni]) {
+                out_dist[ni] = nd;
+                pq.push({nd, ni});
             }
         }
+    }
+}
 
-        i = (i + 1) % remaining;
-        attempts++;
+std::vector<float> generate_sdf(const LoadedBodyImage& img)
+{
+    uint32_t w = img.width;
+    uint32_t h = img.height;
+    uint32_t n = w * h;
+
+    std::vector<bool> inside(n);
+    for (uint32_t i = 0; i < n; i++)
+        inside[i] = img.pixels[i].w > 0.5f;
+
+    // Seeds: every pixel that borders a pixel of the opposite type (4-connectivity).
+    // All such pixels are on the shape boundary and get distance 0.
+    static const int dx4[4] = {-1, 1, 0, 0};
+    static const int dy4[4] = { 0, 0,-1, 1};
+
+    std::vector<bool> seed(n, false);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t i   = y * w + x;
+            bool     in  = inside[i];
+            for (int k = 0; k < 4; k++) {
+                int nx = (int)x + dx4[k];
+                int ny = (int)y + dy4[k];
+                bool neighbor_in = (nx >= 0 && ny >= 0 && nx < (int)w && ny < (int)h)
+                                   ? inside[ny * w + nx] : false;
+                if (in != neighbor_in) { seed[i] = true; break; }
+            }
+        }
     }
 
-    if (remaining == 3)
-        result.push_back({idx[0], idx[1], idx[2]});
+    // One BFS gives unsigned distance-to-boundary for every pixel.
+    std::vector<float> dist;
+    bfs_distance(w, h, seed, dist);
 
-    return result;
+    // Sign: negative inside the shape, positive outside.
+    std::vector<float> sdf(n);
+    for (uint32_t i = 0; i < n; i++)
+        sdf[i] = inside[i] ? -dist[i] : dist[i];
+
+    return sdf;
 }

@@ -85,10 +85,21 @@ uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
         {  hw,  hh },
         { -hw,  hh },
     };
-    rb.triangles = {
-        { 0, 1, 2 },
-        { 0, 2, 3 },
-    };
+
+    // Build a fully-opaque synthetic image so generate_sdf produces a proper
+    // distance field for this rectangle (same pipeline as sprite bodies).
+    uint32_t iw = (uint32_t)std::max(1.f, std::round(w));
+    uint32_t ih = (uint32_t)std::max(1.f, std::round(h));
+    LoadedBodyImage img;
+    img.width  = iw;
+    img.height = ih;
+    img.pixels.assign(iw * ih, glm::vec4(1.f));   // all white, alpha = 1
+
+    rb.sprite = img;
+    rb.sdf    = generate_sdf(img);
+    rb.sdf_w  = iw;
+    rb.sdf_h  = ih;
+
     return add_body(rb);
 }
 

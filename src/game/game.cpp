@@ -46,7 +46,7 @@ static void spawn_body(PhysicsEngine& cpu, ResiduaEngine& engine,
     RigidBody2 rb;
     rb.sprite = img;
     rb.generate_shape();
-    rb.triangulate_shape();
+    rb.generate_sdf();
     rb.compute_mass_properties();
     rb.position = glm::vec3(world_pos, 0.f);
     cpu.add_body(&engine, std::move(rb));

@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <cstdint>
+#include "body_image.h"
 
 std::vector<glm::vec2> marching_squares(
     uint32_t                      width,
@@ -16,8 +17,6 @@ std::vector<glm::vec2> douglas_peucker(
     float                         epsilon
 );
 
-// Stitch unordered marching-squares segment pairs into ordered closed contours.
-// Input is the flat a,b,a,b,... list returned by marching_squares.
 std::vector<std::vector<glm::vec2>> stitch_contours(
     const std::vector<glm::vec2>& segments
 );
@@ -30,8 +29,4 @@ std::vector<glm::vec2> generate_shape(
     float                     epsilon   = 0.5f
 );
 
-struct Triangle {
-    uint32_t a, b, c;
-};
-
-std::vector<Triangle> triangulate(const std::vector<glm::vec2>& polygon);
+std::vector<float> generate_sdf(const LoadedBodyImage& img);
