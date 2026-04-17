@@ -35,21 +35,37 @@ bool Manifold::initialize() {
         oldStick   [i]         = contacts[i].stick;
     }
 
-    auto pts = build_manifold(ba, bb);
+    // Use GPU-precomputed contacts if available, else fall back to CPU.
+    std::vector<ManifoldPoint> pts;
+    uint64_t key = ((uint64_t)bodyA << 32) | (uint64_t)bodyB;
+    auto it = world->precomputed_contacts.find(key);
+    if (it != world->precomputed_contacts.end())
+        pts = it->second;
+    else
+        pts = build_manifold(ba, bb);
     pts = reduce_manifold(std::move(pts), MANIFOLD_MAX_CONTACTS);
     numContacts = (int)pts.size();
 
+    if (numContacts == 0) {
+        for (int j = 0; j < oldNum; j++) {
+            retained_penalty = std::max(retained_penalty, oldPenalty[j * 2 + 0]);
+            retained_penalty = std::max(retained_penalty, oldPenalty[j * 2 + 1]);
+        }
+        retained_penalty = std::max(AVBD_PENALTY_MIN, retained_penalty * AVBD_GAMMA);
+        return true;
+    }
+
     for (int i = 0; i < numContacts; i++) {
-        penalty[i * 2 + 0] = penalty[i * 2 + 1] = 0.f;
-        lambda [i * 2 + 0] = lambda [i * 2 + 1] = 0.f;
+        penalty[i * 2 + 0] = retained_penalty;
+        penalty[i * 2 + 1] = retained_penalty;
+        lambda [i * 2 + 0] = 0.f;
+        lambda [i * 2 + 1] = 0.f;
         contacts[i].stick = false;
     }
 
-    // Convert ManifoldPoints to Contacts and match to old contacts for warm starting.
     for (int i = 0; i < numContacts; i++) {
         const ManifoldPoint& mp = pts[i];
 
-        // rA/rB in body-local space
         contacts[i].rA     = glm::rotate(mp.position - glm::vec2(ba.position), -ba.position.z);
         contacts[i].rB     = glm::rotate(mp.position - glm::vec2(bb.position), -bb.position.z);
         contacts[i].normal = mp.normal;
@@ -69,7 +85,6 @@ bool Manifold::initialize() {
             lambda [i * 2 + 1] = oldLambda [bestJ * 2 + 1];
             contacts[i].stick  = oldStick  [bestJ];
 
-            // If sticking last frame, reuse old local contact points for better static friction.
             if (oldStick[bestJ]) {
                 contacts[i].rA = oldContacts[bestJ].rA;
                 contacts[i].rB = oldContacts[bestJ].rB;
@@ -77,7 +92,6 @@ bool Manifold::initialize() {
         }
     }
 
-    // Precompute Jacobians 
     for (int i = 0; i < numContacts; i++) {
         glm::vec2 n = contacts[i].normal;
         glm::vec2 t = { n.y, -n.x };  // tangent

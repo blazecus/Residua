@@ -4,7 +4,6 @@
 #include <cmath>
 #include <iostream>
 #include <unordered_map>
-#include <queue>
 #include <limits>
 
 // ─── Marching Squares ─────────────────────────────────────────────────────────
@@ -43,13 +42,10 @@ static const int8_t kSegTable[16][4] = {
     {-1, -1, -1, -1},  // 15: (full)
 };
 
-// Compute the position of the contour crossing on a given edge of cell (col,row).
-// Interpolates linearly between the two corner values to find where alpha==threshold.
 static glm::vec2 edge_point(int edge, int col, int row,
                              float vTL, float vTR, float vBR, float vBL,
                              float threshold)
 {
-    // t in [0,1]: how far along the edge the crossing sits.
     auto lerp_t = [&](float va, float vb) -> float {
         float d = vb - va;
         return (std::abs(d) < 1e-6f) ? 0.5f : std::clamp((threshold - va) / d, 0.f, 1.f);
@@ -75,14 +71,11 @@ std::vector<glm::vec2> marching_squares(
     std::vector<Seg> segs;
     segs.reserve((width + height) * 2);
 
-    // Pixels outside the image are treated as transparent (0).
-    // This ensures solid pixels at the image boundary generate proper edge segments.
     auto v = [&](int x, int y) -> float {
         if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) return 0.f;
         return img[y * width + x].w;
     };
 
-    // Iterate over a virtual padded grid: one extra cell on every side.
     for (int row = -1; row < (int)height; row++) {
         for (int col = -1; col < (int)width; col++) {
             float vTL = v(col,   row);
@@ -114,8 +107,6 @@ std::vector<glm::vec2> marching_squares(
 
     return edges;
 }
-
-// ─── Douglas–Peucker ─────────────────────────────────────────────────────────
 
 static float pt_seg_dist_sq(glm::vec2 p, glm::vec2 a, glm::vec2 b)
 {
@@ -175,10 +166,6 @@ std::vector<glm::vec2> douglas_peucker(
     return result;
 }
 
-// ─── Segment stitching ────────────────────────────────────────────────────────
-
-// Quantise a vertex to a fixed-point key so that endpoints computed from
-// the same marching-squares interpolation compare equal.
 struct IVec2 {
     int32_t x, y;
     bool operator==(const IVec2& o) const { return x == o.x && y == o.y; }
@@ -200,7 +187,6 @@ std::vector<std::vector<glm::vec2>> stitch_contours(
     size_t n = segments.size() / 2;
     if (n == 0) return {};
 
-    // Build adjacency: endpoint key → list of (segment index, which end).
     struct HalfEdge { size_t seg; bool is_a; };
     std::unordered_map<IVec2, std::vector<HalfEdge>, IVec2Hash> adj;
     adj.reserve(n * 2);
@@ -267,8 +253,6 @@ std::vector<glm::vec2> generate_shape(
     auto contours = stitch_contours(ms);
     if (contours.empty()) return {};
 
-    // Simplify each contour with DP, then return the one with the most vertices
-    // (largest boundary = outer hull of the shape).
     std::vector<glm::vec2> best;
     for (auto& c : contours) {
         auto simplified = douglas_peucker(c, epsilon);
@@ -279,53 +263,8 @@ std::vector<glm::vec2> generate_shape(
 }
 
 
-static void bfs_distance(uint32_t w, uint32_t h,
-                          const std::vector<bool>& seed,
-                          std::vector<float>& out_dist)
-{
-    const float INF = std::numeric_limits<float>::max();
-    out_dist.assign(w * h, INF);
-
-    // dx/dy/dd for 8 neighbors
-    static const int   dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
-    static const int   dy[8] = {-1,-1,-1,  0, 0,  1, 1, 1};
-    static const float dd[8] = { 1.41421356f, 1.f, 1.41421356f,
-                                  1.f,         1.f,
-                                  1.41421356f, 1.f, 1.41421356f };
-
-    using Entry = std::pair<float, uint32_t>;
-    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq;
-
-    for (uint32_t i = 0; i < w * h; i++) {
-        if (seed[i]) {
-            out_dist[i] = 0.f;
-            pq.push({0.f, i});
-        }
-    }
-
-    while (!pq.empty()) {
-        auto [d, idx] = pq.top(); pq.pop();
-        if (d > out_dist[idx]) continue;
-
-        int x = (int)(idx % w);
-        int y = (int)(idx / w);
-
-        for (int k = 0; k < 8; k++) {
-            int nx = x + dx[k];
-            int ny = y + dy[k];
-            if (nx < 0 || ny < 0 || nx >= (int)w || ny >= (int)h) continue;
-
-            uint32_t ni = (uint32_t)(ny * (int)w + nx);
-            float    nd = d + dd[k];
-            if (nd < out_dist[ni]) {
-                out_dist[ni] = nd;
-                pq.push({nd, ni});
-            }
-        }
-    }
-}
-
-std::vector<float> generate_sdf(const LoadedBodyImage& img)
+std::vector<float> generate_sdf(const LoadedBodyImage& img,
+                                 const std::vector<glm::vec2>& shape_local)
 {
     uint32_t w = img.width;
     uint32_t h = img.height;
@@ -335,34 +274,33 @@ std::vector<float> generate_sdf(const LoadedBodyImage& img)
     for (uint32_t i = 0; i < n; i++)
         inside[i] = img.pixels[i].w > 0.5f;
 
-    // Seeds: every pixel that borders a pixel of the opposite type (4-connectivity).
-    // All such pixels are on the shape boundary and get distance 0.
-    static const int dx4[4] = {-1, 1, 0, 0};
-    static const int dy4[4] = { 0, 0,-1, 1};
+    glm::vec2 center(w * 0.5f, h * 0.5f);
+    int ns = (int)shape_local.size();
 
-    std::vector<bool> seed(n, false);
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            uint32_t i   = y * w + x;
-            bool     in  = inside[i];
-            for (int k = 0; k < 4; k++) {
-                int nx = (int)x + dx4[k];
-                int ny = (int)y + dy4[k];
-                bool neighbor_in = (nx >= 0 && ny >= 0 && nx < (int)w && ny < (int)h)
-                                   ? inside[ny * w + nx] : false;
-                if (in != neighbor_in) { seed[i] = true; break; }
+    std::vector<float> sdf(n);
+
+    for (uint32_t py = 0; py < h; py++) {
+        for (uint32_t px = 0; px < w; px++) {
+            glm::vec2 p{ px + 0.5f, py + 0.5f };  
+
+            float min_d2 = std::numeric_limits<float>::max();
+            for (int i = 0; i < ns; i++) {
+                glm::vec2 a  = shape_local[i]           + center;
+                glm::vec2 b  = shape_local[(i + 1) % ns] + center;
+                glm::vec2 ab = b - a;
+                float     len2 = glm::dot(ab, ab);
+                float     t    = (len2 > 1e-12f)
+                                 ? glm::clamp(glm::dot(p - a, ab) / len2, 0.f, 1.f)
+                                 : 0.f;
+                glm::vec2 diff = p - (a + t * ab);
+                min_d2 = std::min(min_d2, glm::dot(diff, diff));
             }
+
+            float dist = std::sqrt(min_d2);
+            uint32_t idx = py * w + px;
+            sdf[idx] = inside[idx] ? -dist : dist;
         }
     }
-
-    // One BFS gives unsigned distance-to-boundary for every pixel.
-    std::vector<float> dist;
-    bfs_distance(w, h, seed, dist);
-
-    // Sign: negative inside the shape, positive outside.
-    std::vector<float> sdf(n);
-    for (uint32_t i = 0; i < n; i++)
-        sdf[i] = inside[i] ? -dist[i] : dist[i];
 
     return sdf;
 }

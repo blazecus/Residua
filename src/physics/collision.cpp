@@ -3,34 +3,35 @@
 #include <algorithm>
 #include <limits>
 
-// ─── SDF sampling ─────────────────────────────────────────────────────────────
-
 static float sample_sdf(const RigidBody2& body, glm::vec2 img_pos)
 {
     float px = img_pos.x;
     float py = img_pos.y;
 
-    int x0 = (int)px, y0 = (int)py;
+    int x0 = (int)std::floor(px), y0 = (int)std::floor(py);
     int x1 = x0 + 1,  y1 = y0 + 1;
 
     int w = (int)body.sdf_w;
     int h = (int)body.sdf_h;
 
-    auto clamp_idx = [&](int x, int y) -> float {
-        if (x < 0 || y < 0 || x >= w || y >= h) return (float)(w + h);
-        return body.sdf[y * w + x];
+    // out of bounds pixels
+    auto sample_px = [&](int x, int y) -> float {
+        if (x >= 0 && y >= 0 && x < w && y < h)
+            return body.sdf[y * w + x];
+        float dx = x < 0 ? float(-x) : (x >= w ? float(x - w + 1) : 0.f);
+        float dy = y < 0 ? float(-y) : (y >= h ? float(y - h + 1) : 0.f);
+        return dx + dy;
     };
 
     float fx = px - (float)x0;
     float fy = py - (float)y0;
 
-    return clamp_idx(x0, y0) * (1.f - fx) * (1.f - fy)
-         + clamp_idx(x1, y0) *        fx  * (1.f - fy)
-         + clamp_idx(x0, y1) * (1.f - fx) *        fy
-         + clamp_idx(x1, y1) *        fx  *        fy;
+    return sample_px(x0, y0) * (1.f - fx) * (1.f - fy)
+         + sample_px(x1, y0) *        fx  * (1.f - fy)
+         + sample_px(x0, y1) * (1.f - fx) *        fy
+         + sample_px(x1, y1) *        fx  *        fy;
 }
 
-// Finite-difference gradient in image/local space (NOT yet world space).
 static glm::vec2 sdf_gradient(const RigidBody2& body, glm::vec2 img_pos)
 {
     float dx = sample_sdf(body, img_pos + glm::vec2(1.f, 0.f))
@@ -44,8 +45,6 @@ static glm::vec2 local_to_image(const RigidBody2& body, glm::vec2 local_pt)
 {
     return local_pt + glm::vec2(body.sdf_w * 0.5f, body.sdf_h * 0.5f);
 }
-
-// ─── Manifold reduction ───────────────────────────────────────────────────────
 
 std::vector<ManifoldPoint> reduce_manifold(std::vector<ManifoldPoint> points, int n)
 {
@@ -78,14 +77,12 @@ std::vector<ManifoldPoint> reduce_manifold(std::vector<ManifoldPoint> points, in
     return result;
 }
 
-// ─── Build manifold ───────────────────────────────────────────────────────────
-
 struct Candidate {
     glm::vec2 world_pt;
     float     depth;
-    glm::vec2 grad_local;  // gradient in ref body's local/image space
-    float     ref_angle;   // ref body's world rotation, to convert grad to world space
-    float     normal_sign; // +1 if ref=A, -1 if ref=B
+    glm::vec2 grad_local; 
+    float     ref_angle; 
+    float     normal_sign;
 };
 
 static void collect_candidates(
@@ -98,7 +95,6 @@ static void collect_candidates(
         glm::vec2 lv0 = other.shape[vi];
         glm::vec2 lv1 = other.shape[(vi + 1) % n];
 
-        // Transform both endpoints to world space, then ref's image space.
         glm::vec2 w0 = glm::vec2(other.position) + glm::rotate(lv0, other.position.z);
         glm::vec2 w1 = glm::vec2(other.position) + glm::rotate(lv1, other.position.z);
 
@@ -110,24 +106,20 @@ static void collect_candidates(
         float d0 = sample_sdf(ref, img0);
         float d1 = sample_sdf(ref, img1);
 
-        // Both outside — no contact on this edge.
         if (d0 >= 0.f && d1 >= 0.f) continue;
 
         glm::vec2 contact_img;
         float     depth;
 
         if ((d0 < 0.f) != (d1 < 0.f)) {
-            // Sign change: interpolate to find the surface crossing.
             float t    = d0 / (d0 - d1);
             contact_img = img0 + t * (img1 - img0);
             depth       = std::max(-d0, -d1);
         } else {
-            // Both inside: use the shallower endpoint (closest to surface).
             if (d0 > d1) { contact_img = img0; depth = -d0; }
             else          { contact_img = img1; depth = -d1; }
         }
 
-        // Reconstruct world-space contact position from the image-space point.
         glm::vec2 ref_local = contact_img - glm::vec2(ref.sdf_w * 0.5f, ref.sdf_h * 0.5f);
         glm::vec2 world_pt  = glm::vec2(ref.position) + glm::rotate(ref_local, ref.position.z);
 
@@ -145,28 +137,20 @@ std::vector<ManifoldPoint> build_manifold(const RigidBody2& a, const RigidBody2&
 
     if (candidates.empty()) return {};
 
-    // Pick the shallowest candidate: it's closest to the contact surface,
-    // so its gradient is least likely to have flipped through the body center.
-    int best = 0;
-    for (int i = 1; i < (int)candidates.size(); i++)
-        if (candidates[i].depth < candidates[best].depth) best = i;
-
-    const Candidate& c = candidates[best];
-    float len = glm::length(c.grad_local);
-    if (len < 1e-6f) return {};
-
-    // Convert gradient from ref's local/image space to world space, then apply sign.
-    glm::vec2 n = glm::rotate(c.grad_local / len, c.ref_angle) * c.normal_sign;
-
-    // Guarantee n points from A toward B.
     glm::vec2 ab = glm::vec2(b.position) - glm::vec2(a.position);
-    if (glm::length(ab) > 1e-6f && glm::dot(n, ab) < 0.f)
-        n = -n;
 
-    // Emit all penetrating candidates with the shared world-space normal.
     std::vector<ManifoldPoint> points;
-    for (const Candidate& ci : candidates)
+    for (const Candidate& ci : candidates) {
+        float len = glm::length(ci.grad_local);
+        if (len < 1e-6f) continue;
+
+        glm::vec2 n = glm::rotate(ci.grad_local / len, ci.ref_angle) * ci.normal_sign;
+
+        if (glm::length(ab) > 1e-6f && glm::dot(n, ab) < 0.f)
+            n = -n;
+
         points.push_back({ ci.world_pt, n, ci.depth });
+    }
 
     return points;
 }

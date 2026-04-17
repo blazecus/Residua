@@ -1,0 +1,139 @@
+#version 460
+
+// ── Structures (must match GPUEdge / GPUContact in physics_engine.h) ──────────
+
+struct Edge {
+    vec2  v0;  
+    vec2  v1;    
+    vec2  ref_pos;   
+    float ref_angle;   
+    float normal_sign; 
+    uint  sdf_offset;   
+    uint  sdf_w;
+    uint  sdf_h;
+    uint  body_a;
+    uint  body_b;
+    uint  _pad;
+};
+
+struct Contact {
+    vec2  world_pt;
+    vec2  normal;
+    float depth;
+    uint  body_a;
+    uint  body_b;
+    uint  _pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly  buffer EdgeBuffer    { Edge    edges[];    };
+layout(std430, set = 0, binding = 1) readonly  buffer SDFBuffer     { float   sdf_data[]; };
+layout(std430, set = 0, binding = 2)           buffer ContactBuffer { Contact contacts[]; };
+layout(std430, set = 0, binding = 3)           buffer CounterBuffer { uint    contact_count; };
+
+layout(push_constant) uniform PC {
+    uint edge_count;
+    uint max_contacts;
+};
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+float sample_sdf_pix(uint offset, uint w, uint h, int x, int y) {
+    if (x >= 0 && y >= 0 && x < int(w) && y < int(h))
+        return sdf_data[offset + uint(y) * w + uint(x)];
+    float dx = x < 0 ? float(-x) : (x >= int(w) ? float(x - int(w) + 1) : 0.0);
+    float dy = y < 0 ? float(-y) : (y >= int(h) ? float(y - int(h) + 1) : 0.0);
+    return dx + dy;
+}
+
+float sample_sdf(uint offset, uint w, uint h, vec2 p) {
+    int x0 = int(floor(p.x)), y0 = int(floor(p.y));
+    int x1 = x0 + 1,          y1 = y0 + 1;
+    float fx = p.x - float(x0), fy = p.y - float(y0);
+
+    float v00 = sample_sdf_pix(offset, w, h, x0, y0);
+    float v10 = sample_sdf_pix(offset, w, h, x1, y0);
+    float v01 = sample_sdf_pix(offset, w, h, x0, y1);
+    float v11 = sample_sdf_pix(offset, w, h, x1, y1);
+
+    return v00*(1.0-fx)*(1.0-fy) + v10*fx*(1.0-fy) + v01*(1.0-fx)*fy + v11*fx*fy;
+}
+
+vec2 sdf_gradient(uint offset, uint w, uint h, vec2 p) {
+    float dx = sample_sdf(offset, w, h, p + vec2(1,0)) - sample_sdf(offset, w, h, p - vec2(1,0));
+    float dy = sample_sdf(offset, w, h, p + vec2(0,1)) - sample_sdf(offset, w, h, p - vec2(0,1));
+    return vec2(dx, dy) * 0.5;
+}
+
+vec2 world_to_img(vec2 wp, Edge e) {
+    float c = cos(-e.ref_angle), s = sin(-e.ref_angle);
+    vec2  d = wp - e.ref_pos;
+    return vec2(c*d.x - s*d.y, s*d.x + c*d.y)
+           + vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
+}
+
+vec2 img_to_world(vec2 ip, Edge e) {
+    vec2  local = ip - vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
+    float c = cos(e.ref_angle), s = sin(e.ref_angle);
+    return e.ref_pos + vec2(c*local.x - s*local.y, s*local.x + c*local.y);
+}
+
+void emit_contact(Edge e, vec2 contact_img, float depth) {
+    vec2  grad = sdf_gradient(e.sdf_offset, e.sdf_w, e.sdf_h, contact_img);
+    float len  = length(grad);
+    if (len < 1e-6) return;
+
+    float c = cos(e.ref_angle), s = sin(e.ref_angle);
+    vec2  n_local = grad / len;
+    vec2  n = vec2(c*n_local.x - s*n_local.y, s*n_local.x + c*n_local.y) * e.normal_sign;
+
+    uint idx = atomicAdd(contact_count, 1u);
+    if (idx < max_contacts) {
+        contacts[idx].world_pt = img_to_world(contact_img, e);
+        contacts[idx].normal   = n;
+        contacts[idx].depth    = depth;
+        contacts[idx].body_a   = e.body_a;
+        contacts[idx].body_b   = e.body_b;
+        contacts[idx]._pad     = 0u;
+    }
+}
+
+void main() {
+    uint eid = gl_GlobalInvocationID.x;
+    if (eid >= edge_count) return;
+
+    Edge e = edges[eid];
+    vec2  img0 = world_to_img(e.v0, e);
+    vec2  img1 = world_to_img(e.v1, e);
+    float d0   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img0);
+    float d1   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img1);
+
+    if (d0 >= 0.0 && d1 >= 0.0) return;
+
+    float edge_len = length(img1 - img0);
+    int   steps    = clamp(int(edge_len * 0.5), 1, 128);
+
+    float prev_d   = d0;
+    vec2  prev_img = img0;
+    int   emitted  = 0;
+
+    for (int i = 1; i <= steps && emitted < 2; i++) {
+        float t       = float(i) / float(steps);
+        vec2  cur_img = mix(img0, img1, t);
+        float cur_d   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, cur_img);
+
+        if ((prev_d < 0.0) != (cur_d < 0.0)) {
+            float t_x       = prev_d / (prev_d - cur_d);
+            vec2  cross_img = prev_img + t_x * (cur_img - prev_img);
+            emit_contact(e, cross_img, max(-prev_d, -cur_d));
+            emitted++;
+        }
+
+        prev_d   = cur_d;
+        prev_img = cur_img;
+    }
+
+    if (emitted == 0 && d0 < 0.0 && d1 < 0.0) {
+        if (d0 > d1) emit_contact(e, img0, -d0);
+        else         emit_contact(e, img1, -d1);
+    }
+}

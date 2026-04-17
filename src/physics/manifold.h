@@ -19,6 +19,7 @@ struct Manifold : Force {
     Contact contacts[MANIFOLD_MAX_CONTACTS]{};
     int     numContacts{ 0 };
     float   friction{ 0.f };
+    float   retained_penalty{ AVBD_PENALTY_MIN }; 
 
     Manifold(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB);
 

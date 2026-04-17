@@ -160,7 +160,7 @@ TextureCache texCache;
     bool resize_requested { false };
 
     PhysicsEngine*   cpu_physics { nullptr };
-    float _dt { 0.016f };
+    float _dt { 0.007f };
     bool freeze_rendering { false };
 
     void set_window(SDL_Window* window, VkExtent2D& extent);

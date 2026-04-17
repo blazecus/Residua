@@ -3,8 +3,10 @@
 #include "lbvh.h"
 #include "rigid_body.h"
 #include "force.h"
+#include "collision.h"
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <chrono>
 
 struct PhysicsStats {
@@ -18,7 +20,6 @@ struct PhysicsStats {
 };
 
 struct PhysicsWorld {
-    // Simulation parameters
     float gravity   { 100.f };
     float alpha     { AVBD_ALPHA };
     float beta      { AVBD_BETA  };
@@ -34,15 +35,17 @@ struct PhysicsWorld {
 
     LBVH lbvh;
 
-    float        last_dt{ 1.f / 60.f };
+    float        last_dt{ 1.f / 144.f };
     PhysicsStats stats;
 
+    std::unordered_map<uint64_t, std::vector<ManifoldPoint>> precomputed_contacts;
+
     uint32_t    add_body(RigidBody2& rb);
-    // Add an immovable rectangular obstacle (no sprite, not drawn).
-    // center is in world-space pixels; w/h are the full dimensions.
     uint32_t    add_static_rect(glm::vec2 center, float w, float h);
     void        remove_body(uint32_t index);
     RigidBody2& get_body(uint32_t index);
 
+    void prepare();
+    void solve(float dt);
     void step(float dt);
 };

@@ -3,11 +3,11 @@
 #include "../renderer/vk_images.h"
 #include "../renderer/vk_pipelines.h"
 #include "../renderer/vk_initializers.h"
+#include "manifold.h"
 #include <fmt/core.h>
 #include <cassert>
 #include <cstring>
-
-// ─── Local helpers ────────────────────────────────────────────────────────────
+#include <glm/gtx/rotate_vector.hpp>
 
 static VkPipeline make_compute_pipeline(VkDevice device, const char* spv,
                                         VkPipelineLayout layout)
@@ -77,6 +77,7 @@ void PhysicsEngine::grow_buffers(ResiduaEngine* engine,
     w.write_buffer(1, new_pixel_buf.buffer,    new_cap_pixels * sizeof(glm::vec4),        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     w.write_image (2, output_screen.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     w.write_buffer(3, new_active_buf.buffer,   new_cap_bodies * sizeof(uint32_t),         0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    w.write_buffer(4, sdf_data_buf.buffer,     cap_sdf_floats * sizeof(float),            0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     w.update_set(engine->_device, draw_desc);
 
     if (bodies_grew && cap_bodies > 0) {
@@ -93,11 +94,48 @@ void PhysicsEngine::grow_buffers(ResiduaEngine* engine,
     cap_pixels         = new_cap_pixels;
 }
 
+void PhysicsEngine::grow_sdf_buffer(ResiduaEngine* engine, uint32_t needed_floats)
+{
+    uint32_t new_cap = std::max(cap_sdf_floats, 1u << 20); // start at 4MB
+    while (new_cap < needed_floats) new_cap *= 2;
+    if (new_cap == cap_sdf_floats) return;
+
+    vkDeviceWaitIdle(engine->_device);
+
+    AllocatedBuffer new_buf = engine->create_buffer(
+        new_cap * sizeof(float),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    if (next_sdf_float > 0)
+        std::memcpy(new_buf.info.pMappedData,
+                    sdf_data_buf.info.pMappedData,
+                    next_sdf_float * sizeof(float));
+
+    if (cap_sdf_floats > 0)
+        vmaDestroyBuffer(engine->_allocator, sdf_data_buf.buffer, sdf_data_buf.allocation);
+
+    sdf_data_buf   = new_buf;
+    cap_sdf_floats = new_cap;
+
+    if (manifold_gen_desc != VK_NULL_HANDLE) {
+        DescriptorWriter w;
+        w.write_buffer(0, edge_buf.buffer,     MAX_GPU_EDGES    * sizeof(GPUEdge),    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_buffer(1, sdf_data_buf.buffer, cap_sdf_floats   * sizeof(float),      0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_buffer(2, contact_buf.buffer,  MAX_GPU_CONTACTS * sizeof(GPUContact), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.write_buffer(3, counter_buf.buffer,  sizeof(uint32_t),                      0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.update_set(engine->_device, manifold_gen_desc);
+    }
+    if (draw_desc != VK_NULL_HANDLE) {
+        DescriptorWriter w;
+        w.write_buffer(4, sdf_data_buf.buffer, cap_sdf_floats * sizeof(float), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        w.update_set(engine->_device, draw_desc);
+    }
+}
+
 void PhysicsEngine::init(ResiduaEngine* engine)
 {
+    engine_ref = engine;
     VkDevice device = engine->_device;
-
-    // ── Output image ─────────────────────────────────────────────────────────
 
     output_screen = engine->create_image(
         { PHYSICS_WIDTH, PHYSICS_HEIGHT, 1 },
@@ -105,7 +143,6 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
-    // Transition to GENERAL layout once so it stays there.
     engine->immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, output_screen.image,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -119,6 +156,8 @@ void PhysicsEngine::init(ResiduaEngine* engine)
     };
     desc_allocator.init_pool(device, 4, pool_ratios);
 
+    grow_sdf_buffer(engine, 1u << 20);
+
     // ── Draw pipeline ─────────────────────────────────────────────────────────
     {
         auto& pl = draw_pl;
@@ -127,6 +166,7 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // pixel_colors_buf
         b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_screen
         b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // active_indices_buf
+        b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // sdf_data_buf
         pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
 
         VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
@@ -173,13 +213,54 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         w.update_set(device, gap_fill_desc);
     }
 
+    // ── Manifold-gen pipeline ─────────────────────────────────────────────────
+    {
+        auto& pl = manifold_gen_pl;
+        DescriptorLayoutBuilder b;
+        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // edge_buf
+        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // sdf_data_buf
+        b.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_buf
+        b.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // counter_buf
+        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
+
+        struct MgenPC { uint32_t edge_count; uint32_t max_contacts; };
+        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MgenPC) };
+        VkPipelineLayoutCreateInfo li {
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 1,
+            .pSetLayouts            = &pl.desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pc,
+        };
+        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
+        pl.pipeline = make_compute_pipeline(device,
+            "../shaders/manifold_gen.comp.spv", pl.layout);
+
+        manifold_gen_desc = desc_allocator.allocate(device, pl.desc_layout);
+
+        // Fixed-size edge / contact / counter buffers.
+        edge_buf = engine->create_buffer(
+            MAX_GPU_EDGES    * sizeof(GPUEdge),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        contact_buf = engine->create_buffer(
+            MAX_GPU_CONTACTS * sizeof(GPUContact),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+        counter_buf = engine->create_buffer(
+            sizeof(uint32_t),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+
+    }
+
     engine->_mainDeletionQueue.push_function([this, device]() {
-        vkDestroyPipeline(device, draw_pl.pipeline,      nullptr);
-        vkDestroyPipeline(device, gap_fill_pl.pipeline,  nullptr);
-        vkDestroyPipelineLayout(device, draw_pl.layout,      nullptr);
-        vkDestroyPipelineLayout(device, gap_fill_pl.layout,  nullptr);
-        vkDestroyDescriptorSetLayout(device, draw_pl.desc_layout,     nullptr);
-        vkDestroyDescriptorSetLayout(device, gap_fill_pl.desc_layout, nullptr);
+        vkDestroyPipeline(device, draw_pl.pipeline,           nullptr);
+        vkDestroyPipeline(device, gap_fill_pl.pipeline,       nullptr);
+        vkDestroyPipeline(device, manifold_gen_pl.pipeline,   nullptr);
+        vkDestroyPipelineLayout(device, draw_pl.layout,           nullptr);
+        vkDestroyPipelineLayout(device, gap_fill_pl.layout,       nullptr);
+        vkDestroyPipelineLayout(device, manifold_gen_pl.layout,   nullptr);
+        vkDestroyDescriptorSetLayout(device, draw_pl.desc_layout,          nullptr);
+        vkDestroyDescriptorSetLayout(device, gap_fill_pl.desc_layout,      nullptr);
+        vkDestroyDescriptorSetLayout(device, manifold_gen_pl.desc_layout,  nullptr);
         desc_allocator.destroy_pool(device);
     });
 }
@@ -193,19 +274,23 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
     const uint32_t pixel_offset = next_pixel;
     next_pixel += n;
 
+    const uint32_t sdf_offset = next_sdf_float;
+    next_sdf_float += n;
+
     uint32_t slot = world.add_body(body);
-    grow_buffers(engine,
-        (uint32_t)world.bodies.size(),
-        next_pixel);
+    grow_buffers(engine, (uint32_t)world.bodies.size(), next_pixel);
+    grow_sdf_buffer(engine, next_sdf_float);
 
     if (slot >= (uint32_t)body_draw_info.size())
         body_draw_info.resize(slot + 1);
 
-    body_draw_info[slot] = { pixel_offset, w, h };
+    body_draw_info[slot] = { pixel_offset, w, h, sdf_offset };
 
-    const size_t byte_size = n * sizeof(glm::vec4);
-    auto* dst = static_cast<glm::vec4*>(pixel_colors_buf.info.pMappedData);
-    std::memcpy(dst + pixel_offset, body.sprite.pixels.data(), byte_size);
+    auto* px_dst = static_cast<glm::vec4*>(pixel_colors_buf.info.pMappedData);
+    std::memcpy(px_dst + pixel_offset, body.sprite.pixels.data(), n * sizeof(glm::vec4));
+
+    auto* sdf_dst = static_cast<float*>(sdf_data_buf.info.pMappedData);
+    std::memcpy(sdf_dst + sdf_offset, body.sdf.data(), n * sizeof(float));
 
     return slot;
 }
@@ -220,7 +305,7 @@ std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
         const RigidBody2&   rb  = world.bodies[i];
-        const BodyDrawInfo& bdi = body_draw_info[i];
+        const BodyGPUInfo& bdi = body_draw_info[i];
 
         glm::vec2 delta = world_pos - glm::vec2(rb.position);
         float c = std::cos(-rb.position.z), s = std::sin(-rb.position.z);
@@ -241,8 +326,118 @@ std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
 
 void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
 {
-    // 1. Step the CPU physics simulation.
-    world.step(dt);
+    // 1. Broadphase — creates manifold stubs, clears precomputed_contacts.
+    world.prepare();
+
+    // 2. Build edge list for all active manifold pairs.
+    auto* edge_ptr = static_cast<GPUEdge*>(edge_buf.info.pMappedData);
+    uint32_t edge_count = 0;
+
+    for (const auto& f : world.forces) {
+        auto* m = dynamic_cast<Manifold*>(f.get());
+        if (!m) continue;
+
+        uint32_t idxA = m->bodyA, idxB = m->bodyB;
+        const RigidBody2& ba = world.bodies[idxA];
+        const RigidBody2& bb = world.bodies[idxB];
+
+        const BodyGPUInfo& infoA = (idxA < body_draw_info.size()) ? body_draw_info[idxA] : BodyGPUInfo{};
+        const BodyGPUInfo& infoB = (idxB < body_draw_info.size()) ? body_draw_info[idxB] : BodyGPUInfo{};
+
+        // Pass 1: B's edges vs A's SDF
+        if (infoA.body_w > 0) {
+            int nB = (int)bb.shape.size();
+            for (int vi = 0; vi < nB && edge_count < MAX_GPU_EDGES; vi++) {
+                glm::vec2 lv0 = bb.shape[vi];
+                glm::vec2 lv1 = bb.shape[(vi + 1) % nB];
+                GPUEdge& e   = edge_ptr[edge_count++];
+                e.v0         = glm::vec2(bb.position) + glm::rotate(lv0, bb.position.z);
+                e.v1         = glm::vec2(bb.position) + glm::rotate(lv1, bb.position.z);
+                e.ref_pos    = glm::vec2(ba.position);
+                e.ref_angle  = ba.position.z;
+                e.normal_sign = 1.f;
+                e.sdf_offset = infoA.sdf_offset;
+                e.sdf_w      = ba.sdf_w;
+                e.sdf_h      = ba.sdf_h;
+                e.body_a     = idxA;
+                e.body_b     = idxB;
+            }
+        }
+
+        // Pass 2: A's edges vs B's SDF
+        if (infoB.body_w > 0) {
+            int nA = (int)ba.shape.size();
+            for (int vi = 0; vi < nA && edge_count < MAX_GPU_EDGES; vi++) {
+                glm::vec2 lv0 = ba.shape[vi];
+                glm::vec2 lv1 = ba.shape[(vi + 1) % nA];
+                GPUEdge& e    = edge_ptr[edge_count++];
+                e.v0          = glm::vec2(ba.position) + glm::rotate(lv0, ba.position.z);
+                e.v1          = glm::vec2(ba.position) + glm::rotate(lv1, ba.position.z);
+                e.ref_pos     = glm::vec2(bb.position);
+                e.ref_angle   = bb.position.z;
+                e.normal_sign = -1.f;
+                e.sdf_offset  = infoB.sdf_offset;
+                e.sdf_w       = bb.sdf_w;
+                e.sdf_h       = bb.sdf_h;
+                e.body_a      = idxA;
+                e.body_b      = idxB;
+            }
+        }
+    }
+
+    // 3. GPU manifold-gen pass (synchronous via immediate_submit).
+    if (edge_count > 0) {
+        // Clear counter.
+        *static_cast<uint32_t*>(counter_buf.info.pMappedData) = 0u;
+
+        struct MgenPC { uint32_t edge_count; uint32_t max_contacts; }
+            pc { edge_count, MAX_GPU_CONTACTS };
+
+        engine_ref->immediate_submit([&, pc](VkCommandBuffer icmd) {
+            vkCmdBindPipeline(icmd, VK_PIPELINE_BIND_POINT_COMPUTE, manifold_gen_pl.pipeline);
+            vkCmdBindDescriptorSets(icmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                manifold_gen_pl.layout, 0, 1, &manifold_gen_desc, 0, nullptr);
+            vkCmdPushConstants(icmd, manifold_gen_pl.layout,
+                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(icmd, (edge_count + 63) / 64, 1, 1);
+        });
+
+        // 4. Read back contacts and distribute to precomputed_contacts.
+        uint32_t num_contacts = std::min(
+            *static_cast<uint32_t*>(counter_buf.info.pMappedData),
+            MAX_GPU_CONTACTS);
+
+        auto* contacts = static_cast<GPUContact*>(contact_buf.info.pMappedData);
+
+        // Group raw GPU contacts by pair.
+        std::unordered_map<uint64_t, std::vector<ManifoldPoint>> raw;
+        for (uint32_t ci = 0; ci < num_contacts; ci++) {
+            const GPUContact& gc = contacts[ci];
+            uint64_t key = ((uint64_t)gc.body_a << 32) | gc.body_b;
+            raw[key].push_back({ gc.world_pt, gc.normal, gc.depth });
+        }
+
+        // Per pair: keep each contact's own normal (from its SDF gradient),
+        // just ensure it points A→B.
+        for (auto& [key, pts] : raw) {
+            if (pts.empty()) continue;
+
+            uint32_t idxA = (uint32_t)(key >> 32);
+            uint32_t idxB = (uint32_t)(key & 0xFFFFFFFF);
+            glm::vec2 ab  = glm::vec2(world.bodies[idxB].position)
+                          - glm::vec2(world.bodies[idxA].position);
+
+            if (glm::length(ab) > 1e-6f) {
+                for (auto& p : pts)
+                    if (glm::dot(p.normal, ab) < 0.f)
+                        p.normal = -p.normal;
+            }
+            world.precomputed_contacts[key] = std::move(pts);
+        }
+    }
+
+    // 5. Solve (warm-start + AVBD iterations).
+    world.solve(dt);
 
     // 2. Upload draw data for all active bodies.
     auto* rb_ptr     = static_cast<RigidBodyDrawGPU*>(rb_draw_buf.info.pMappedData);
@@ -252,7 +447,7 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
         if (i >= (uint32_t)body_draw_info.size()) continue;
-        const BodyDrawInfo& bdi = body_draw_info[i];
+        const BodyGPUInfo& bdi = body_draw_info[i];
         if (bdi.body_w == 0 || bdi.body_h == 0) continue;
 
         const RigidBody2& rb = world.bodies[i];
@@ -266,6 +461,7 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
             .pixel_index      = bdi.pixel_index,
             .body_w           = bdi.body_w,
             .body_h           = bdi.body_h,
+            .sdf_offset       = bdi.sdf_offset,
         };
         active_ptr[active_count++] = i;
     }
@@ -336,6 +532,7 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     vkCmdPushConstants(cmd, gap_fill_pl.layout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gap_pc), &gap_pc);
     vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
+
 }
 
 PhysicsStats PhysicsEngine::get_stats(){

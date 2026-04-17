@@ -5,8 +5,6 @@
 #include <cmath>
 #include <iostream>
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 static AABB compute_world_aabb(const RigidBody2& rb) {
     glm::vec2 mn( 1e20f,  1e20f);
     glm::vec2 mx(-1e20f, -1e20f);
@@ -18,7 +16,6 @@ static AABB compute_world_aabb(const RigidBody2& rb) {
     return { mn, mx };
 }
 
-// Returns true if a Manifold already exists between bodyA and bodyB.
 static bool manifold_exists(const std::vector<std::unique_ptr<Force>>& forces,
                              uint32_t a, uint32_t b)
 {
@@ -28,7 +25,6 @@ static bool manifold_exists(const std::vector<std::unique_ptr<Force>>& forces,
     return false;
 }
 
-// Force constructor registers itself — here we just own it.
 Force::Force(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
     : world(world), bodyA(bodyA), bodyB(bodyB)
 {
@@ -42,8 +38,6 @@ Force::Force(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
         lambda[i]    = 0.f;
     }
 }
-
-// ─── Body management ──────────────────────────────────────────────────────────
 
 uint32_t PhysicsWorld::add_body(RigidBody2& rb) {
     if (!open_slots.empty()) {
@@ -86,17 +80,15 @@ uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
         { -hw,  hh },
     };
 
-    // Build a fully-opaque synthetic image so generate_sdf produces a proper
-    // distance field for this rectangle (same pipeline as sprite bodies).
     uint32_t iw = (uint32_t)std::max(1.f, std::round(w));
     uint32_t ih = (uint32_t)std::max(1.f, std::round(h));
     LoadedBodyImage img;
     img.width  = iw;
     img.height = ih;
-    img.pixels.assign(iw * ih, glm::vec4(1.f));   // all white, alpha = 1
+    img.pixels.assign(iw * ih, glm::vec4(1.f));  
 
     rb.sprite = img;
-    rb.sdf    = generate_sdf(img);
+    rb.sdf    = generate_sdf(img, rb.shape);
     rb.sdf_w  = iw;
     rb.sdf_h  = ih;
 
@@ -107,20 +99,17 @@ RigidBody2& PhysicsWorld::get_body(uint32_t index) {
     return bodies[index];
 }
 
-// ─── Step ─────────────────────────────────────────────────────────────────────
-
-void PhysicsWorld::step(float dt) {
-    std::chrono::microseconds elapsed{ 0 };
+void PhysicsWorld::prepare() {
     auto start = std::chrono::system_clock::now();
+
+    precomputed_contacts.clear();
 
     stats.num_bodies = 0;
     for (uint32_t i = 0; i < (uint32_t)active.size(); i++)
         if (active[i]) stats.num_bodies++;
 
-    // 1. Build LBVH from world-space AABBs of active bodies.
     std::vector<AABB>     boxes;
     std::vector<uint32_t> index_map;
-
     for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
         if (!active[i] || bodies[i].shape.empty()) continue;
         boxes.push_back(compute_world_aabb(bodies[i]));
@@ -128,11 +117,9 @@ void PhysicsWorld::step(float dt) {
     }
     lbvh_build(lbvh, boxes);
 
-    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
-	stats.lbvh_ms = elapsed.count() / 1000.f;
-    start = std::chrono::system_clock::now(); 
+    auto t1 = std::chrono::system_clock::now();
+    stats.lbvh_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
 
-    // 2. Broad phase: create a Manifold for each new overlapping body pair.
     std::vector<int> candidates;
     for (uint32_t li = 0; li < (uint32_t)index_map.size(); li++) {
         lbvh_query_AABB(lbvh, boxes[li], candidates);
@@ -145,12 +132,14 @@ void PhysicsWorld::step(float dt) {
         }
     }
 
+    auto t2 = std::chrono::system_clock::now();
+    stats.broadphase_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
+}
 
-    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
-	stats.broadphase_ms = elapsed.count() / 1000.f;
-    start = std::chrono::system_clock::now();
+void PhysicsWorld::solve(float dt) {
+    auto start = std::chrono::system_clock::now();
 
-    // 3. Warm-start forces (dual variables: lambda, penalty).
+    // Warm-start forces (initializes contacts, Jacobians, dual variables).
     for (auto& f : forces) {
         if (!f->initialize()) {
             f.reset();
@@ -169,7 +158,10 @@ void PhysicsWorld::step(float dt) {
     forces.erase(std::remove_if(forces.begin(), forces.end(),
         [](const std::unique_ptr<Force>& f) { return !f; }), forces.end());
 
-    // 4. Warm-start bodies (primal variables: predict position).
+    auto t1 = std::chrono::system_clock::now();
+    stats.warmstart_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
+
+    // Predict positions (primal warm-start).
     for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
         if (!active[i]) continue;
         RigidBody2& rb = bodies[i];
@@ -180,9 +172,9 @@ void PhysicsWorld::step(float dt) {
         if (rb.inv_mass > 0.f)
             rb.inertial += glm::vec3(0.f, gravity, 0.f) * (dt * dt);
 
-        glm::vec3 accel = (rb.velocity - rb.prev_velocity) / dt;
-        float accelExt  = accel.y * (gravity < 0.f ? -1.f : 1.f);
-        float accelWeight = std::clamp(accelExt / std::abs(gravity), 0.f, 1.f);
+        glm::vec3 accel      = (rb.velocity - rb.prev_velocity) / dt;
+        float     accelExt   = accel.y * (gravity < 0.f ? -1.f : 1.f);
+        float     accelWeight = std::clamp(accelExt / std::abs(gravity), 0.f, 1.f);
         if (!std::isfinite(accelWeight)) accelWeight = 0.f;
 
         rb.initial  = rb.position;
@@ -191,11 +183,10 @@ void PhysicsWorld::step(float dt) {
             rb.position += glm::vec3(0.f, gravity, 0.f) * (accelWeight * dt * dt);
     }
 
-    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
-	stats.warmstart_ms = elapsed.count() / 1000.f;
-    start = std::chrono::system_clock::now();
+    auto t2 = std::chrono::system_clock::now();
+    stats.predict_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
 
-    // 5. Main solver loop.
+    // Main solver loop.
     int totalIterations = iterations + (postStabilize ? 1 : 0);
 
     for (int it = 0; it < totalIterations; it++) {
@@ -203,12 +194,11 @@ void PhysicsWorld::step(float dt) {
         if (postStabilize)
             currentAlpha = (it < iterations) ? 1.f : 0.f;
 
-        // ── Primal update ──────────────────────────────────────────────────
         for (uint32_t bi = 0; bi < (uint32_t)bodies.size(); bi++) {
             if (!active[bi] || bodies[bi].inv_mass == 0.f) continue;
             RigidBody2& rb = bodies[bi];
 
-            Mat3 lhs = mat3_diag(rb.mass, rb.mass, rb.inertia) / (dt * dt);
+            Mat3      lhs = mat3_diag(rb.mass, rb.mass, rb.inertia) / (dt * dt);
             glm::vec3 rhs = lhs * (rb.position - rb.inertial);
 
             for (auto& f : forces) {
@@ -218,7 +208,7 @@ void PhysicsWorld::step(float dt) {
                 f->computeDerivatives(bi);
 
                 for (int i = 0; i < f->rows(); i++) {
-                    float lam = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
+                    float lam       = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
                     float force_val = std::clamp(f->penalty[i] * f->C[i] + lam,
                                                  f->fmin[i], f->fmax[i]);
 
@@ -234,12 +224,11 @@ void PhysicsWorld::step(float dt) {
             rb.position -= mat3_solve(lhs, rhs);
         }
 
-        // ── Dual update ───────────────
         if (it < iterations) {
             for (auto& f : forces) {
                 f->computeConstraint(currentAlpha);
                 for (int i = 0; i < f->rows(); i++) {
-                    float lam = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
+                    float lam    = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
                     f->lambda[i] = std::clamp(f->penalty[i] * f->C[i] + lam,
                                               f->fmin[i], f->fmax[i]);
 
@@ -250,7 +239,6 @@ void PhysicsWorld::step(float dt) {
             }
         }
 
-        // ── Velocity update ────────────────
         if (it == iterations - 1) {
             for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
                 if (!active[i]) continue;
@@ -262,6 +250,11 @@ void PhysicsWorld::step(float dt) {
         }
     }
 
-    elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now () - start);
-	stats.solver_ms = elapsed.count() / 1000.f;
+    auto t3 = std::chrono::system_clock::now();
+    stats.solver_ms = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count() / 1000.f;
+}
+
+void PhysicsWorld::step(float dt) {
+    prepare();
+    solve(dt);
 }
