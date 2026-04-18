@@ -30,4 +30,5 @@ std::vector<glm::vec2> generate_shape(
 );
 
 std::vector<float> generate_sdf(const LoadedBodyImage& img,
-                                 const std::vector<glm::vec2>& shape_local);
+                                 const std::vector<glm::vec2>& shape_local,
+                                 glm::vec2 com_local);

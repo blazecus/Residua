@@ -278,6 +278,7 @@ void ResiduaEngine::draw_frame() {
 	ImGui::Text("warm start %f ms", physics_stats.warmstart_ms);
 	ImGui::Text("solver %f ms", physics_stats.solver_ms);
 	ImGui::Text("bodies %u", physics_stats.num_bodies);
+	ImGui::Text("contacts %u", physics_stats.num_contacts);
 	ImGui::End();
 
 	ImGui::Render();

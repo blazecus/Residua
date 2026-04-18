@@ -1,0 +1,32 @@
+// contact_draw.comp — draws a yellow dot at each active contact point
+
+#version 460
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ContactPtBuffer {
+    vec2 points[];
+};
+
+layout(rgba16f, set = 0, binding = 1) uniform image2D output_image;
+
+layout(push_constant) uniform PC {
+    uint contact_count;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= contact_count) return;
+
+    vec2 p = points[idx];
+    ivec2 image_size = imageSize(output_image);
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 coord = ivec2(floor(p)) + ivec2(dx, dy);
+            if (coord.x >= 0 && coord.y >= 0 &&
+                coord.x < image_size.x && coord.y < image_size.y)
+                imageStore(output_image, coord, vec4(1.0, 1.0, 0.0, 1.0));
+        }
+    }
+}

@@ -27,10 +27,9 @@ void Game::init() {
     cpu_physics.init(&engine);
     engine.cpu_physics = &cpu_physics;
 
-    // Static boundaries (floor + walls).
     const float W = float(PHYSICS_WIDTH);
     const float H = float(PHYSICS_HEIGHT);
-    const float T = 20.f;  // wall thickness
+    const float T = 20.f;  
     cpu_physics.world.add_static_rect({ W * 0.5f, H + T * 0.5f }, W, T);  // floor
     cpu_physics.world.add_static_rect({ W * 0.5f, -T * 0.5f    }, W, T);  // ceiling
     cpu_physics.world.add_static_rect({ -T * 0.5f, H * 0.5f    }, T, H);  // left wall
@@ -39,15 +38,14 @@ void Game::init() {
     lastFrame = std::chrono::system_clock::now();
 }
 
-// Helper: build a RigidBody2 from a loaded image and spawn it at world_pos.
 static void spawn_body(PhysicsEngine& cpu, ResiduaEngine& engine,
                        const LoadedBodyImage& img, glm::vec2 world_pos)
 {
     RigidBody2 rb;
     rb.sprite = img;
-    rb.generate_shape();
+    rb.compute_mass_properties();  
+    rb.generate_shape();  
     rb.generate_sdf();
-    rb.compute_mass_properties();
     rb.position = glm::vec3(world_pos, 0.f);
     cpu.add_body(&engine, std::move(rb));
 }

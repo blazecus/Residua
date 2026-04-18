@@ -17,6 +17,7 @@ struct PhysicsStats {
     float    solver_ms     { 0.f };
     float    total_ms      { 0.f };
     uint32_t num_bodies    { 0 };
+    uint32_t num_contacts  { 0 };
 };
 
 struct PhysicsWorld {
@@ -39,6 +40,9 @@ struct PhysicsWorld {
     PhysicsStats stats;
 
     std::unordered_map<uint64_t, std::vector<ManifoldPoint>> precomputed_contacts;
+
+    std::vector<uint32_t> colors;
+    uint32_t              max_color{0};
 
     uint32_t    add_body(RigidBody2& rb);
     uint32_t    add_static_rect(glm::vec2 center, float w, float h);

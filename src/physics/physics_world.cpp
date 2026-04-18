@@ -88,7 +88,7 @@ uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
     img.pixels.assign(iw * ih, glm::vec4(1.f));  
 
     rb.sprite = img;
-    rb.sdf    = generate_sdf(img, rb.shape);
+    rb.sdf    = generate_sdf(img, rb.shape, glm::vec2(0.f));  
     rb.sdf_w  = iw;
     rb.sdf_h  = ih;
 
@@ -239,15 +239,14 @@ void PhysicsWorld::solve(float dt) {
             }
         }
 
-        if (it == iterations - 1) {
-            for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
-                if (!active[i]) continue;
-                RigidBody2& rb = bodies[i];
-                rb.prev_velocity = rb.velocity;
-                if (rb.inv_mass > 0.f)
-                    rb.velocity = (rb.position - rb.initial) / dt;
-            }
-        }
+    }
+
+    for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
+        if (!active[i]) continue;
+        RigidBody2& rb = bodies[i];
+        rb.prev_velocity = rb.velocity;
+        if (rb.inv_mass > 0.f)
+            rb.velocity = (rb.position - rb.initial) / dt;
     }
 
     auto t3 = std::chrono::system_clock::now();

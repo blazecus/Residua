@@ -1,0 +1,55 @@
+#version 460
+
+// Jones-Plassmann graph coloring — one invocation per body.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer AdjOffsets { uint adj_offsets[]; };
+layout(std430, set = 0, binding = 1) readonly buffer AdjList    { uint adj_list[];    };
+layout(std430, set = 0, binding = 2) readonly buffer Priorities { uint priorities[];  };
+layout(std430, set = 0, binding = 3) readonly buffer ActiveBuf  { uint active_flags[]; };
+layout(std430, set = 0, binding = 4)          buffer ColorsBuf  { uint colors[];      };
+
+layout(push_constant) uniform PC {
+    uint body_count;
+};
+
+void main() {
+    uint bid = gl_GlobalInvocationID.x;
+    if (bid >= body_count) return;
+
+    // excluded
+    if (active_flags[bid] == 0u) {
+        colors[bid] = 0xFFFFFFFFu;
+        return;
+    }
+
+    // already assigned
+    if (colors[bid] != 0u) return;
+
+    uint start = adj_offsets[bid];
+    uint end   = adj_offsets[bid + 1u];
+
+    // Jones-Plassmann: color only if this node has the highest priority
+    for (uint i = start; i < end; i++) {
+        uint nb = adj_list[i];
+        if (colors[nb] != 0u) continue; 
+        if (priorities[nb] > priorities[bid]) return;
+        if (priorities[nb] == priorities[bid] && nb > bid) return;
+    }
+
+    // Find the smallest color not used by any already-colored neighbor.
+    uint forbidden = 0u;
+    for (uint i = start; i < end; i++) {
+        uint nb = adj_list[i];
+        uint c  = colors[nb];
+        if (c != 0u && c != 0xFFFFFFFFu && c <= 31u)
+            forbidden |= 1u << (c - 1u);
+    }
+
+    uint color = 1u;
+    while (color <= 32u && ((forbidden >> (color - 1u)) & 1u) != 0u)
+        color++;
+
+    colors[bid] = color;
+}

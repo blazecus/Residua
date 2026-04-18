@@ -7,8 +7,8 @@
 
 struct RigidBody2 {
     LoadedBodyImage sprite;
-    std::vector<glm::vec2> shape;      // contour vertices (local space, centered)
-    std::vector<float>     sdf;        // signed distance field (pixel units, negative inside)
+    std::vector<glm::vec2> shape;      
+    std::vector<float>     sdf;  
     uint32_t sdf_w{0}, sdf_h{0};
     AABB unrotated_AABB;
 
@@ -17,6 +17,8 @@ struct RigidBody2 {
     glm::vec3 inertial{0.f};   
     glm::vec3 velocity{0.f};
     glm::vec3 prev_velocity{0.f};
+
+    glm::vec2 com_local{0.f};  
 
     float mass{1.f};
     float inertia{1.f};

@@ -3,17 +3,17 @@
 // ── Structures (must match GPUEdge / GPUContact in physics_engine.h) ──────────
 
 struct Edge {
-    vec2  v0;  
-    vec2  v1;    
-    vec2  ref_pos;   
-    float ref_angle;   
-    float normal_sign; 
-    uint  sdf_offset;   
+    vec2  v0;
+    vec2  v1;
+    vec2  ref_pos;
+    float ref_angle;
+    float normal_sign;
+    uint  sdf_offset;
     uint  sdf_w;
     uint  sdf_h;
     uint  body_a;
     uint  body_b;
-    uint  _pad;
+    vec2  ref_com_local;  
 };
 
 struct Contact {
@@ -67,14 +67,14 @@ vec2 sdf_gradient(uint offset, uint w, uint h, vec2 p) {
 vec2 world_to_img(vec2 wp, Edge e) {
     float c = cos(-e.ref_angle), s = sin(-e.ref_angle);
     vec2  d = wp - e.ref_pos;
-    return vec2(c*d.x - s*d.y, s*d.x + c*d.y)
-           + vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
+    vec2  com_local = vec2(c*d.x - s*d.y, s*d.x + c*d.y);
+    return com_local + e.ref_com_local + vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
 }
 
 vec2 img_to_world(vec2 ip, Edge e) {
-    vec2  local = ip - vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
+    vec2  com_local = ip - e.ref_com_local - vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
     float c = cos(e.ref_angle), s = sin(e.ref_angle);
-    return e.ref_pos + vec2(c*local.x - s*local.y, s*local.x + c*local.y);
+    return e.ref_pos + vec2(c*com_local.x - s*com_local.y, s*com_local.x + c*com_local.y);
 }
 
 void emit_contact(Edge e, vec2 contact_img, float depth) {

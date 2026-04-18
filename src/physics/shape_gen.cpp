@@ -264,7 +264,8 @@ std::vector<glm::vec2> generate_shape(
 
 
 std::vector<float> generate_sdf(const LoadedBodyImage& img,
-                                 const std::vector<glm::vec2>& shape_local)
+                                 const std::vector<glm::vec2>& shape_local,
+                                 glm::vec2 com_local)
 {
     uint32_t w = img.width;
     uint32_t h = img.height;
@@ -274,19 +275,19 @@ std::vector<float> generate_sdf(const LoadedBodyImage& img,
     for (uint32_t i = 0; i < n; i++)
         inside[i] = img.pixels[i].w > 0.5f;
 
-    glm::vec2 center(w * 0.5f, h * 0.5f);
+    glm::vec2 img_offset(w * 0.5f + com_local.x, h * 0.5f + com_local.y);
     int ns = (int)shape_local.size();
 
     std::vector<float> sdf(n);
 
     for (uint32_t py = 0; py < h; py++) {
         for (uint32_t px = 0; px < w; px++) {
-            glm::vec2 p{ px + 0.5f, py + 0.5f };  
+            glm::vec2 p{ px + 0.5f, py + 0.5f };
 
             float min_d2 = std::numeric_limits<float>::max();
             for (int i = 0; i < ns; i++) {
-                glm::vec2 a  = shape_local[i]           + center;
-                glm::vec2 b  = shape_local[(i + 1) % ns] + center;
+                glm::vec2 a  = shape_local[i]            + img_offset;
+                glm::vec2 b  = shape_local[(i + 1) % ns] + img_offset;
                 glm::vec2 ab = b - a;
                 float     len2 = glm::dot(ab, ab);
                 float     t    = (len2 > 1e-12f)

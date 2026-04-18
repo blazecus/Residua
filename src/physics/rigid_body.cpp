@@ -14,14 +14,13 @@ AABB RigidBody2::generate_AABB() {
 
 void RigidBody2::generate_shape() {
     shape = ::generate_shape(sprite.width, sprite.height, sprite.pixels);
-    // Center vertices around origin to match the draw-shader convention.
     glm::vec2 half(sprite.width * 0.5f, sprite.height * 0.5f);
     for (auto& v : shape)
-        v -= half;
+        v -= half + com_local;
 }
 
 void RigidBody2::generate_sdf() {
-    sdf   = ::generate_sdf(sprite, shape);
+    sdf   = ::generate_sdf(sprite, shape, com_local);
     sdf_w = sprite.width;
     sdf_h = sprite.height;
 }
@@ -45,6 +44,7 @@ void RigidBody2::compute_mass_properties(float density) {
     }
 
     centroid /= pixel_count;
+    com_local = centroid - glm::vec2(sprite.width * 0.5f, sprite.height * 0.5f);
     mass = density * pixel_count;
 
     float I = 0.f;
