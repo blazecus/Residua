@@ -22,7 +22,7 @@ void Game::init() {
 
     ball_image = load_body_image("../assets/physics/ball.png");
     cshape     = load_body_image("../assets/physics/cshape.png");
-    star       = load_body_image("../assets/physics/star.png");
+    star       = load_body_image("../assets/physics/boom.png");
 
     cpu_physics.init(&engine);
     engine.cpu_physics = &cpu_physics;

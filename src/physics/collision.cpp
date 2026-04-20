@@ -80,9 +80,10 @@ std::vector<ManifoldPoint> reduce_manifold(std::vector<ManifoldPoint> points, in
 struct Candidate {
     glm::vec2 world_pt;
     float     depth;
-    glm::vec2 grad_local; 
-    float     ref_angle; 
+    glm::vec2 grad_local;
+    float     ref_angle;
     float     normal_sign;
+    glm::vec2 outside_img; 
 };
 
 static void collect_candidates(
@@ -110,14 +111,16 @@ static void collect_candidates(
 
         glm::vec2 contact_img;
         float     depth;
+        glm::vec2 outside_img;
 
         if ((d0 < 0.f) != (d1 < 0.f)) {
             float t    = d0 / (d0 - d1);
             contact_img = img0 + t * (img1 - img0);
             depth       = std::max(-d0, -d1);
+            outside_img = (d0 >= 0.f) ? (img0 - contact_img) : (img1 - contact_img);
         } else {
-            if (d0 > d1) { contact_img = img0; depth = -d0; }
-            else          { contact_img = img1; depth = -d1; }
+            if (d0 > d1) { contact_img = img0; depth = -d0; outside_img = img0 - img1; }
+            else          { contact_img = img1; depth = -d1; outside_img = img1 - img0; }
         }
 
         glm::vec2 ref_local = contact_img - glm::vec2(ref.sdf_w * 0.5f, ref.sdf_h * 0.5f) - ref.com_local;
@@ -125,7 +128,7 @@ static void collect_candidates(
 
         out.push_back({ world_pt, depth,
                         sdf_gradient(ref, contact_img),
-                        ref.position.z, normal_sign });
+                        ref.position.z, normal_sign, outside_img });
     }
 }
 
@@ -137,17 +140,16 @@ std::vector<ManifoldPoint> build_manifold(const RigidBody2& a, const RigidBody2&
 
     if (candidates.empty()) return {};
 
-    glm::vec2 ab = glm::vec2(b.position) - glm::vec2(a.position);
-
     std::vector<ManifoldPoint> points;
     for (const Candidate& ci : candidates) {
         float len = glm::length(ci.grad_local);
         if (len < 1e-6f) continue;
 
-        glm::vec2 n = glm::rotate(ci.grad_local / len, ci.ref_angle) * ci.normal_sign;
+        glm::vec2 n_local = ci.grad_local / len;
+        if (glm::dot(n_local, ci.outside_img) < 0.f)
+            n_local = -n_local;
 
-        if (glm::length(ab) > 1e-6f && glm::dot(n, ab) < 0.f)
-            n = -n;
+        glm::vec2 n = glm::rotate(n_local, ci.ref_angle) * ci.normal_sign;
 
         points.push_back({ ci.world_pt, n, ci.depth });
     }

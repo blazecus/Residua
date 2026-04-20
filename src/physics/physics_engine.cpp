@@ -579,8 +579,8 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
                 e.sdf_offset  = infoA.sdf_offset;
                 e.sdf_w       = ba.sdf_w;
                 e.sdf_h       = ba.sdf_h;
-                e.body_a      = idxA;
-                e.body_b      = idxB;
+                e.body_a        = idxA;
+                e.body_b        = idxB;
                 e.ref_com_local = ba.com_local;
             }
         }
@@ -600,8 +600,8 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
                 e.sdf_offset  = infoB.sdf_offset;
                 e.sdf_w       = bb.sdf_w;
                 e.sdf_h       = bb.sdf_h;
-                e.body_a      = idxA;
-                e.body_b      = idxB;
+                e.body_a        = idxA;
+                e.body_b        = idxB;
                 e.ref_com_local = bb.com_local;
             }
         }
@@ -639,21 +639,8 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
             raw[key].push_back({ gc.world_pt, gc.normal, gc.depth });
         }
 
-        // Per pair: keep each contact's own normal (from its SDF gradient),
-        // just ensure it points A→B.
         for (auto& [key, pts] : raw) {
             if (pts.empty()) continue;
-
-            uint32_t idxA = (uint32_t)(key >> 32);
-            uint32_t idxB = (uint32_t)(key & 0xFFFFFFFF);
-            glm::vec2 ab  = glm::vec2(world.bodies[idxB].position)
-                          - glm::vec2(world.bodies[idxA].position);
-
-            if (glm::length(ab) > 1e-6f) {
-                for (auto& p : pts)
-                    if (glm::dot(p.normal, ab) < 0.f)
-                        p.normal = -p.normal;
-            }
             world.precomputed_contacts[key] = std::move(pts);
         }
     }

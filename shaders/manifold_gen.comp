@@ -13,7 +13,8 @@ struct Edge {
     uint  sdf_h;
     uint  body_a;
     uint  body_b;
-    vec2  ref_com_local;  
+    uint  _pad;          // explicit padding — aligns ref_com_local to 8 bytes (std430)
+    vec2  ref_com_local;
 };
 
 struct Contact {
@@ -77,13 +78,16 @@ vec2 img_to_world(vec2 ip, Edge e) {
     return e.ref_pos + vec2(c*com_local.x - s*com_local.y, s*com_local.x + c*com_local.y);
 }
 
-void emit_contact(Edge e, vec2 contact_img, float depth) {
+void emit_contact(Edge e, vec2 contact_img, float depth, vec2 outside_img) {
     vec2  grad = sdf_gradient(e.sdf_offset, e.sdf_w, e.sdf_h, contact_img);
     float len  = length(grad);
     if (len < 1e-6) return;
 
+    vec2 n_local = grad / len;
+    if (dot(n_local, outside_img - contact_img) < 0.0)
+        n_local = -n_local;
+
     float c = cos(e.ref_angle), s = sin(e.ref_angle);
-    vec2  n_local = grad / len;
     vec2  n = vec2(c*n_local.x - s*n_local.y, s*n_local.x + c*n_local.y) * e.normal_sign;
 
     uint idx = atomicAdd(contact_count, 1u);
@@ -107,10 +111,8 @@ void main() {
     float d0   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img0);
     float d1   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img1);
 
-    if (d0 >= 0.0 && d1 >= 0.0) return;
-
     float edge_len = length(img1 - img0);
-    int   steps    = clamp(int(edge_len * 0.5), 1, 128);
+    int   steps    = clamp(int(ceil(edge_len)), 1, 512);
 
     float prev_d   = d0;
     vec2  prev_img = img0;
@@ -124,7 +126,8 @@ void main() {
         if ((prev_d < 0.0) != (cur_d < 0.0)) {
             float t_x       = prev_d / (prev_d - cur_d);
             vec2  cross_img = prev_img + t_x * (cur_img - prev_img);
-            emit_contact(e, cross_img, max(-prev_d, -cur_d));
+            vec2  outside   = (prev_d >= 0.0) ? prev_img : cur_img;
+            emit_contact(e, cross_img, max(-prev_d, -cur_d), outside);
             emitted++;
         }
 
@@ -133,7 +136,7 @@ void main() {
     }
 
     if (emitted == 0 && d0 < 0.0 && d1 < 0.0) {
-        if (d0 > d1) emit_contact(e, img0, -d0);
-        else         emit_contact(e, img1, -d1);
+        if (d0 > d1) emit_contact(e, img0, -d0, img0 + (img0 - img1));
+        else         emit_contact(e, img1, -d1, img1 + (img1 - img0));
     }
 }

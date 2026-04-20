@@ -26,9 +26,10 @@ struct GPUEdge {
     uint32_t  sdf_offset;
     uint32_t  sdf_w, sdf_h;
     uint32_t  body_a, body_b;
-    glm::vec2 ref_com_local; 
+    uint32_t  _pad{0};       
+    glm::vec2 ref_com_local;
 };
-static_assert(sizeof(GPUEdge) == 60);
+static_assert(sizeof(GPUEdge) == 64);
 
 struct GPUContact {
     glm::vec2 world_pt;

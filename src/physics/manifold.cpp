@@ -39,6 +39,7 @@ bool Manifold::initialize() {
     std::vector<ManifoldPoint> pts;
     uint64_t key = ((uint64_t)bodyA << 32) | (uint64_t)bodyB;
     auto it = world->precomputed_contacts.find(key);
+    // TODO: gpu contacts never generated. fix
     if (it != world->precomputed_contacts.end())
         pts = it->second;
     else
