@@ -30,10 +30,10 @@ void Game::init() {
     const float W = float(PHYSICS_WIDTH);
     const float H = float(PHYSICS_HEIGHT);
     const float T = 20.f;  
-    cpu_physics.world.add_static_rect({ W * 0.5f, H + T * 0.5f }, W, T);  // floor
-    cpu_physics.world.add_static_rect({ W * 0.5f, -T * 0.5f    }, W, T);  // ceiling
-    cpu_physics.world.add_static_rect({ -T * 0.5f, H * 0.5f    }, T, H);  // left wall
-    cpu_physics.world.add_static_rect({ W + T * 0.5f, H * 0.5f }, T, H);  // right wall
+    cpu_physics.add_static_rect(&engine, { W * 0.5f, H + T * 0.5f }, W, T);  // floor
+    cpu_physics.add_static_rect(&engine, { W * 0.5f, -T * 0.5f    }, W, T);  // ceiling
+    cpu_physics.add_static_rect(&engine, { -T * 0.5f, H * 0.5f    }, T, H);  // left wall
+    cpu_physics.add_static_rect(&engine, { W + T * 0.5f, H * 0.5f }, T, H);  // right wall
 
     lastFrame = std::chrono::system_clock::now();
 }

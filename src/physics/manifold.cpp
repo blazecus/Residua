@@ -39,11 +39,15 @@ bool Manifold::initialize() {
     std::vector<ManifoldPoint> pts;
     uint64_t key = ((uint64_t)bodyA << 32) | (uint64_t)bodyB;
     auto it = world->precomputed_contacts.find(key);
-    // TODO: gpu contacts never generated. fix
-    if (it != world->precomputed_contacts.end())
+    if (it != world->precomputed_contacts.end()) {
         pts = it->second;
-    else
+    }
+    else {
         pts = build_manifold(ba, bb);
+        if (!pts.empty())
+            printf("cpu fallback: %u contacts for pair (%u,%u)\n",
+                   (uint32_t)pts.size(), bodyA, bodyB);
+    }
     pts = reduce_manifold(std::move(pts), MANIFOLD_MAX_CONTACTS);
     numContacts = (int)pts.size();
 

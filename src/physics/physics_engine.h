@@ -12,24 +12,31 @@ class ResiduaEngine;
 
 static constexpr uint32_t PHYSICS_WIDTH    = 480;
 static constexpr uint32_t PHYSICS_HEIGHT   = 270;
-static constexpr uint32_t MAX_GPU_EDGES    = 16384;
 static constexpr uint32_t MAX_GPU_CONTACTS = 4096;
-static constexpr uint32_t MAX_COLOR_BODIES = 1024;  
-static constexpr uint32_t MAX_COLOR_ADJ    = 4096;  
-static constexpr uint32_t COLOR_JP_ITERS   = 16;   
+static constexpr uint32_t MAX_GPU_BODIES   = 1024;
+static constexpr uint32_t MAX_GPU_VERTS    = 65536;
+static constexpr uint32_t MAX_GPU_PAIRS    = 4096;
+static constexpr uint32_t MAX_COLOR_BODIES = 1024;
+static constexpr uint32_t MAX_COLOR_ADJ    = 4096;
+static constexpr uint32_t COLOR_JP_ITERS   = 16;
 
-struct GPUEdge {
-    glm::vec2 v0, v1;
-    glm::vec2 ref_pos;
-    float     ref_angle;
-    float     normal_sign;
-    uint32_t  sdf_offset;
-    uint32_t  sdf_w, sdf_h;
-    uint32_t  body_a, body_b;
-    uint32_t  _pad{0};       
-    glm::vec2 ref_com_local;
+struct GPUBodyInfo {
+    glm::vec2 pos;           
+    float     angle;        
+    uint32_t  edge_offset;  
+    uint32_t  edge_count;  
+    uint32_t  sdf_offset;  
+    uint32_t  sdf_w; 
+    uint32_t  sdf_h; 
+    glm::vec2 com_local;  
+};                 
+static_assert(sizeof(GPUBodyInfo) == 40);
+
+struct GPUPair {
+    uint32_t body_a;
+    uint32_t body_b;
 };
-static_assert(sizeof(GPUEdge) == 64);
+static_assert(sizeof(GPUPair) == 8);
 
 struct GPUContact {
     glm::vec2 world_pt;
@@ -51,7 +58,7 @@ struct RigidBodyDrawGPU {
     uint32_t  body_w;
     uint32_t  body_h;
     uint32_t  sdf_offset{0};
-    glm::vec2 com_local;   
+    glm::vec2 com_local;
     glm::vec2 _pad{0.f};
 };
 static_assert(sizeof(RigidBodyDrawGPU) == 64);
@@ -60,10 +67,10 @@ class PhysicsEngine {
 public:
     PhysicsWorld world;
 
-    AllocatedImage  output_screen;         
-    AllocatedBuffer rb_draw_buf;          
-    AllocatedBuffer pixel_colors_buf;     
-    AllocatedBuffer active_indices_buf;   
+    AllocatedImage  output_screen;
+    AllocatedBuffer rb_draw_buf;
+    AllocatedBuffer pixel_colors_buf;
+    AllocatedBuffer active_indices_buf;
 
     struct DrawPipeline {
         VkPipeline            pipeline{VK_NULL_HANDLE};
@@ -74,14 +81,16 @@ public:
     VkDescriptorSet     draw_desc{VK_NULL_HANDLE};
     VkDescriptorSet     gap_fill_desc{VK_NULL_HANDLE};
     VkDescriptorSet     contact_draw_desc{VK_NULL_HANDLE};
-    AllocatedBuffer     contact_pt_buf;   
+    AllocatedBuffer     contact_pt_buf;
     DescriptorAllocator desc_allocator;
 
     struct BodyGPUInfo {
         uint32_t pixel_index{0};
         uint32_t body_w{0};
         uint32_t body_h{0};
-        uint32_t sdf_offset{0};  
+        uint32_t sdf_offset{0};
+        uint32_t edge_offset{0};
+        uint32_t edge_count{0};  
     };
     std::vector<BodyGPUInfo> body_draw_info;
     uint32_t next_pixel{0};
@@ -94,18 +103,21 @@ public:
 
     struct DrawPipeline manifold_gen_pl;
     VkDescriptorSet     manifold_gen_desc{VK_NULL_HANDLE};
-    AllocatedBuffer     edge_buf;      
-    AllocatedBuffer     contact_buf;   
-    AllocatedBuffer     counter_buf;  
+    AllocatedBuffer     body_info_buf;   
+    AllocatedBuffer     body_verts_buf;  
+    AllocatedBuffer     pair_buf;      
+    AllocatedBuffer     contact_buf;
+    AllocatedBuffer     counter_buf;
+    uint32_t            next_vert{0};
 
     // ── Jones-Plassmann body coloring ─────────────────────────────────────────
     struct DrawPipeline coloring_pl;
     VkDescriptorSet     coloring_desc{VK_NULL_HANDLE};
     AllocatedBuffer     col_adj_offsets_buf;
-    AllocatedBuffer     col_adj_list_buf;   
-    AllocatedBuffer     col_priorities_buf; 
-    AllocatedBuffer     col_active_buf;    
-    AllocatedBuffer     col_colors_buf;      
+    AllocatedBuffer     col_adj_list_buf;
+    AllocatedBuffer     col_priorities_buf;
+    AllocatedBuffer     col_active_buf;
+    AllocatedBuffer     col_colors_buf;
 
     ResiduaEngine* engine_ref{nullptr};
 
@@ -117,6 +129,7 @@ private:
 
 public:
     uint32_t add_body(ResiduaEngine* engine, RigidBody2 body);
+    uint32_t add_static_rect(ResiduaEngine* engine, glm::vec2 center, float w, float h);
 
     void remove_body(uint32_t idx);
 

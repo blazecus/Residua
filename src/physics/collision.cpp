@@ -83,7 +83,7 @@ struct Candidate {
     glm::vec2 grad_local;
     float     ref_angle;
     float     normal_sign;
-    glm::vec2 outside_img; 
+    glm::vec2 outside_img;
 };
 
 static void collect_candidates(

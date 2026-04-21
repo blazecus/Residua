@@ -1,20 +1,14 @@
 #version 460
 
-// ── Structures (must match GPUEdge / GPUContact in physics_engine.h) ──────────
-
-struct Edge {
-    vec2  v0;
-    vec2  v1;
-    vec2  ref_pos;
-    float ref_angle;
-    float normal_sign;
-    uint  sdf_offset;
+struct BodyInfo {
+    vec2  pos;
+    float angle;
+    uint  edge_offset; 
+    uint  edge_count;  
+    uint  sdf_offset; 
     uint  sdf_w;
     uint  sdf_h;
-    uint  body_a;
-    uint  body_b;
-    uint  _pad;          // explicit padding — aligns ref_com_local to 8 bytes (std430)
-    vec2  ref_com_local;
+    vec2  com_local;
 };
 
 struct Contact {
@@ -26,13 +20,20 @@ struct Contact {
     uint  _pad;
 };
 
-layout(std430, set = 0, binding = 0) readonly  buffer EdgeBuffer    { Edge    edges[];    };
-layout(std430, set = 0, binding = 1) readonly  buffer SDFBuffer     { float   sdf_data[]; };
-layout(std430, set = 0, binding = 2)           buffer ContactBuffer { Contact contacts[]; };
-layout(std430, set = 0, binding = 3)           buffer CounterBuffer { uint    contact_count; };
+struct Pair {
+    uint body_a;
+    uint body_b;
+};
+
+layout(std430, set = 0, binding = 0) readonly  buffer BodyBuffer    { BodyInfo bodies[];      };
+layout(std430, set = 0, binding = 1) readonly  buffer SDFBuffer     { float    sdf_data[];    };
+layout(std430, set = 0, binding = 2) readonly  buffer VertBuffer    { vec2     verts[];       };
+layout(std430, set = 0, binding = 3) readonly  buffer PairBuffer    { Pair     pairs[];       };
+layout(std430, set = 0, binding = 4)           buffer ContactBuffer { Contact  contacts[];    };
+layout(std430, set = 0, binding = 5)           buffer CounterBuffer { uint     contact_count; };
 
 layout(push_constant) uniform PC {
-    uint edge_count;
+    uint pair_count;
     uint max_contacts;
 };
 
@@ -48,15 +49,12 @@ float sample_sdf_pix(uint offset, uint w, uint h, int x, int y) {
 
 float sample_sdf(uint offset, uint w, uint h, vec2 p) {
     int x0 = int(floor(p.x)), y0 = int(floor(p.y));
-    int x1 = x0 + 1,          y1 = y0 + 1;
+    int x1 = x0 + 1, y1 = y0 + 1;
     float fx = p.x - float(x0), fy = p.y - float(y0);
-
-    float v00 = sample_sdf_pix(offset, w, h, x0, y0);
-    float v10 = sample_sdf_pix(offset, w, h, x1, y0);
-    float v01 = sample_sdf_pix(offset, w, h, x0, y1);
-    float v11 = sample_sdf_pix(offset, w, h, x1, y1);
-
-    return v00*(1.0-fx)*(1.0-fy) + v10*fx*(1.0-fy) + v01*(1.0-fx)*fy + v11*fx*fy;
+    return sample_sdf_pix(offset, w, h, x0, y0) * (1.0-fx)*(1.0-fy)
+         + sample_sdf_pix(offset, w, h, x1, y0) * fx*(1.0-fy)
+         + sample_sdf_pix(offset, w, h, x0, y1) * (1.0-fx)*fy
+         + sample_sdf_pix(offset, w, h, x1, y1) * fx*fy;
 }
 
 vec2 sdf_gradient(uint offset, uint w, uint h, vec2 p) {
@@ -65,21 +63,22 @@ vec2 sdf_gradient(uint offset, uint w, uint h, vec2 p) {
     return vec2(dx, dy) * 0.5;
 }
 
-vec2 world_to_img(vec2 wp, Edge e) {
-    float c = cos(-e.ref_angle), s = sin(-e.ref_angle);
-    vec2  d = wp - e.ref_pos;
-    vec2  com_local = vec2(c*d.x - s*d.y, s*d.x + c*d.y);
-    return com_local + e.ref_com_local + vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
+vec2 world_to_img(vec2 wp, BodyInfo ref) {
+    float c = cos(-ref.angle), s = sin(-ref.angle);
+    vec2  d = wp - ref.pos;
+    vec2  local = vec2(c*d.x - s*d.y, s*d.x + c*d.y);
+    return local + ref.com_local + vec2(float(ref.sdf_w)*0.5, float(ref.sdf_h)*0.5);
 }
 
-vec2 img_to_world(vec2 ip, Edge e) {
-    vec2  com_local = ip - e.ref_com_local - vec2(float(e.sdf_w)*0.5, float(e.sdf_h)*0.5);
-    float c = cos(e.ref_angle), s = sin(e.ref_angle);
-    return e.ref_pos + vec2(c*com_local.x - s*com_local.y, s*com_local.x + c*com_local.y);
+vec2 img_to_world(vec2 ip, BodyInfo ref) {
+    vec2  local = ip - ref.com_local - vec2(float(ref.sdf_w)*0.5, float(ref.sdf_h)*0.5);
+    float c = cos(ref.angle), s = sin(ref.angle);
+    return ref.pos + vec2(c*local.x - s*local.y, s*local.x + c*local.y);
 }
 
-void emit_contact(Edge e, vec2 contact_img, float depth, vec2 outside_img) {
-    vec2  grad = sdf_gradient(e.sdf_offset, e.sdf_w, e.sdf_h, contact_img);
+void emit(BodyInfo ref, uint body_a, uint body_b,
+          vec2 contact_img, float depth, vec2 outside_img, float normal_sign) {
+    vec2  grad = sdf_gradient(ref.sdf_offset, ref.sdf_w, ref.sdf_h, contact_img);
     float len  = length(grad);
     if (len < 1e-6) return;
 
@@ -87,56 +86,83 @@ void emit_contact(Edge e, vec2 contact_img, float depth, vec2 outside_img) {
     if (dot(n_local, outside_img - contact_img) < 0.0)
         n_local = -n_local;
 
-    float c = cos(e.ref_angle), s = sin(e.ref_angle);
-    vec2  n = vec2(c*n_local.x - s*n_local.y, s*n_local.x + c*n_local.y) * e.normal_sign;
+    float c = cos(ref.angle), s = sin(ref.angle);
+    vec2  n = vec2(c*n_local.x - s*n_local.y, s*n_local.x + c*n_local.y) * normal_sign;
 
     uint idx = atomicAdd(contact_count, 1u);
     if (idx < max_contacts) {
-        contacts[idx].world_pt = img_to_world(contact_img, e);
+        contacts[idx].world_pt = img_to_world(contact_img, ref);
         contacts[idx].normal   = n;
         contacts[idx].depth    = depth;
-        contacts[idx].body_a   = e.body_a;
-        contacts[idx].body_b   = e.body_b;
+        contacts[idx].body_a   = body_a;
+        contacts[idx].body_b   = body_b;
         contacts[idx]._pad     = 0u;
     }
 }
 
-void main() {
-    uint eid = gl_GlobalInvocationID.x;
-    if (eid >= edge_count) return;
+void test_edges(BodyInfo ref, BodyInfo other, uint body_a, uint body_b, float normal_sign) {
+    float co = cos(other.angle), so = sin(other.angle);
 
-    Edge e = edges[eid];
-    vec2  img0 = world_to_img(e.v0, e);
-    vec2  img1 = world_to_img(e.v1, e);
-    float d0   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img0);
-    float d1   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, img1);
+    for (uint vi = 0; vi < other.edge_count; vi++) {
+        vec2 lv0 = verts[other.edge_offset + vi];
+        vec2 lv1 = verts[other.edge_offset + (vi + 1u) % other.edge_count];
 
-    float edge_len = length(img1 - img0);
-    int   steps    = clamp(int(ceil(edge_len)), 1, 512);
+        vec2 w0 = other.pos + vec2(co*lv0.x - so*lv0.y, so*lv0.x + co*lv0.y);
+        vec2 w1 = other.pos + vec2(co*lv1.x - so*lv1.y, so*lv1.x + co*lv1.y);
 
-    float prev_d   = d0;
-    vec2  prev_img = img0;
-    int   emitted  = 0;
+        vec2  img0 = world_to_img(w0, ref);
+        vec2  img1 = world_to_img(w1, ref);
+        float d0   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, img0);
+        float d1   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, img1);
 
-    for (int i = 1; i <= steps && emitted < 2; i++) {
-        float t       = float(i) / float(steps);
-        vec2  cur_img = mix(img0, img1, t);
-        float cur_d   = sample_sdf(e.sdf_offset, e.sdf_w, e.sdf_h, cur_img);
+        if (d0 >= 0.0 && d1 >= 0.0) continue;
 
-        if ((prev_d < 0.0) != (cur_d < 0.0)) {
-            float t_x       = prev_d / (prev_d - cur_d);
-            vec2  cross_img = prev_img + t_x * (cur_img - prev_img);
-            vec2  outside   = (prev_d >= 0.0) ? prev_img : cur_img;
-            emit_contact(e, cross_img, max(-prev_d, -cur_d), outside);
-            emitted++;
+        float edge_len = length(img1 - img0);
+        int   steps    = clamp(int(ceil(edge_len)), 1, 512);
+
+        float prev_d   = d0;
+        vec2  prev_img = img0;
+        int   emitted  = 0;
+
+        for (int i = 1; i <= steps && emitted < 2; i++) {
+            float t       = float(i) / float(steps);
+            vec2  cur_img = mix(img0, img1, t);
+            float cur_d   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, cur_img);
+
+            if ((prev_d < 0.0) != (cur_d < 0.0)) {
+                float t_x       = prev_d / (prev_d - cur_d);
+                vec2  cross_img = prev_img + t_x * (cur_img - prev_img);
+                vec2  outside   = (prev_d >= 0.0) ? prev_img : cur_img;
+                emit(ref, body_a, body_b, cross_img, max(-prev_d, -cur_d), outside, normal_sign);
+                emitted++;
+            }
+
+            prev_d   = cur_d;
+            prev_img = cur_img;
         }
 
-        prev_d   = cur_d;
-        prev_img = cur_img;
+        if (emitted == 0 && d0 < 0.0 && d1 < 0.0) {
+            if (d0 > d1) emit(ref, body_a, body_b, img0, -d0, img0 + (img0 - img1), normal_sign);
+            else         emit(ref, body_a, body_b, img1, -d1, img1 + (img1 - img0), normal_sign);
+        }
     }
+}
 
-    if (emitted == 0 && d0 < 0.0 && d1 < 0.0) {
-        if (d0 > d1) emit_contact(e, img0, -d0, img0 + (img0 - img1));
-        else         emit_contact(e, img1, -d1, img1 + (img1 - img0));
-    }
+void main() {
+    uint pid = gl_GlobalInvocationID.x;
+    if (pid >= pair_count) return;
+
+    uint idxA = pairs[pid].body_a;
+    uint idxB = pairs[pid].body_b;
+
+    BodyInfo a = bodies[idxA];
+    BodyInfo b = bodies[idxB];
+
+    // Pass 1: B's edges vs A's SDF. A's gradient points outward from A (toward B). normal_sign=+1.
+    if (a.sdf_w > 0u && b.edge_count > 0u)
+        test_edges(a, b, idxA, idxB, +1.0);
+
+    // Pass 2: A's edges vs B's SDF. B's gradient points outward from B (toward A). Negate. normal_sign=-1.
+    if (b.sdf_w > 0u && a.edge_count > 0u)
+        test_edges(b, a, idxA, idxB, -1.0);
 }
