@@ -658,7 +658,13 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
             if (pts.empty()) continue;
             world.precomputed_contacts[key] = std::move(pts);
         }
+
+        world.stats.gpu_contacts = num_contacts;
     }
+
+    world.stats.gpu_pairs      = pair_count;
+    world.stats.gpu_verts      = next_vert;
+    world.stats.gpu_sdf_floats = next_sdf_float;
 
     // 5. Solve (warm-start + AVBD iterations).
     world.solve(dt);

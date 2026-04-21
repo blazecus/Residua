@@ -279,6 +279,13 @@ void ResiduaEngine::draw_frame() {
 	ImGui::Text("solver %f ms", physics_stats.solver_ms);
 	ImGui::Text("bodies %u", physics_stats.num_bodies);
 	ImGui::Text("contacts %u", physics_stats.num_contacts);
+	ImGui::Text("forces %u", physics_stats.num_forces);
+	ImGui::Separator();
+	ImGui::Text("gpu pairs    %u / %u", physics_stats.gpu_pairs,      MAX_GPU_PAIRS);
+	ImGui::Text("gpu verts    %u / %u", physics_stats.gpu_verts,      MAX_GPU_VERTS);
+	ImGui::Text("gpu sdf KB   %u / %u", physics_stats.gpu_sdf_floats * 4 / 1024,
+	                                     cpu_physics->cap_sdf_floats  * 4 / 1024);
+	ImGui::Text("gpu contacts %u / %u", physics_stats.gpu_contacts,   MAX_GPU_CONTACTS);
 	ImGui::End();
 
 	ImGui::Render();

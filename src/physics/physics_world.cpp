@@ -132,6 +132,8 @@ void PhysicsWorld::prepare() {
         }
     }
 
+    stats.num_forces = (uint32_t)forces.size();
+
     auto t2 = std::chrono::system_clock::now();
     stats.broadphase_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
 }

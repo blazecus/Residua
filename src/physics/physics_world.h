@@ -18,6 +18,12 @@ struct PhysicsStats {
     float    total_ms      { 0.f };
     uint32_t num_bodies    { 0 };
     uint32_t num_contacts  { 0 };
+    uint32_t num_forces    { 0 };
+
+    uint32_t gpu_pairs     { 0 };
+    uint32_t gpu_verts     { 0 };
+    uint32_t gpu_sdf_floats{ 0 };
+    uint32_t gpu_contacts  { 0 };
 };
 
 struct PhysicsWorld {
