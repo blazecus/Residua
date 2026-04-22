@@ -17,7 +17,6 @@ struct PhysicsStats {
     float    solver_ms     { 0.f };
     float    total_ms      { 0.f };
     uint32_t num_bodies    { 0 };
-    uint32_t num_contacts  { 0 };
     uint32_t num_forces    { 0 };
 
     uint32_t gpu_pairs     { 0 };

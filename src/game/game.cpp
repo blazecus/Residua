@@ -22,7 +22,7 @@ void Game::init() {
 
     ball_image = load_body_image("../assets/physics/ball.png");
     cshape     = load_body_image("../assets/physics/cshape.png");
-    star       = load_body_image("../assets/physics/chair.png");
+    star       = load_body_image("../assets/physics/star.png");
 
     cpu_physics.init(&engine);
     engine.cpu_physics = &cpu_physics;
@@ -90,7 +90,7 @@ void Game::run() {
             };
         };
 
-        if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 2) {
+        if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 20) {
             spawn_body(cpu_physics, engine, ball_image, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {

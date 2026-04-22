@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <execution>
+#include <numeric>
+#include <mutex>
+#include <unordered_set>
 
 static AABB compute_world_aabb(const RigidBody2& rb) {
     glm::vec2 mn( 1e20f,  1e20f);
@@ -16,14 +20,6 @@ static AABB compute_world_aabb(const RigidBody2& rb) {
     return { mn, mx };
 }
 
-static bool manifold_exists(const std::vector<std::unique_ptr<Force>>& forces,
-                             uint32_t a, uint32_t b)
-{
-    for (const auto& f : forces)
-        if ((f->bodyA == a && f->bodyB == b) || (f->bodyA == b && f->bodyB == a))
-            if (dynamic_cast<Manifold*>(f.get())) return true;
-    return false;
-}
 
 Force::Force(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
     : world(world), bodyA(bodyA), bodyB(bodyB)
@@ -120,17 +116,46 @@ void PhysicsWorld::prepare() {
     auto t1 = std::chrono::system_clock::now();
     stats.lbvh_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
 
-    std::vector<int> candidates;
-    for (uint32_t li = 0; li < (uint32_t)index_map.size(); li++) {
-        lbvh_query_AABB(lbvh, boxes[li], candidates);
-        for (int lj : candidates) {
-            if (lj <= (int)li) continue;
-            uint32_t i = index_map[li];
-            uint32_t j = index_map[lj];
-            if (!manifold_exists(forces, i, j))
-                forces.push_back(std::make_unique<Manifold>(this, i, j));
-        }
+    // Build O(1) lookup for already-existing manifold pairs.
+    std::unordered_set<uint64_t> existing;
+    existing.reserve(forces.size() * 2);
+    for (const auto& f : forces) {
+        uint32_t a = std::min(f->bodyA, f->bodyB);
+        uint32_t b = std::max(f->bodyA, f->bodyB);
+        existing.insert(((uint64_t)a << 32) | b);
     }
+
+    // Parallel AABB queries — each thread owns its local candidates vector.
+    // The lj > li guard ensures pair (i,j) is emitted by exactly one thread
+    std::vector<std::pair<uint32_t,uint32_t>> new_pairs;
+    std::mutex new_pairs_mtx;
+
+    std::vector<uint32_t> li_range((uint32_t)index_map.size());
+    std::iota(li_range.begin(), li_range.end(), 0u);
+
+    std::for_each(std::execution::par, li_range.begin(), li_range.end(),
+        [&](uint32_t li) {
+            std::vector<int> local_cands;
+            lbvh_query_AABB(lbvh, boxes[li], local_cands);
+
+            std::vector<std::pair<uint32_t,uint32_t>> local_new;
+            for (int lj : local_cands) {
+                if (lj <= (int)li) continue;
+                uint32_t i = index_map[li];
+                uint32_t j = index_map[lj];
+                uint32_t a = std::min(i, j), b = std::max(i, j);
+                if (!existing.count(((uint64_t)a << 32) | b))
+                    local_new.push_back({i, j});
+            }
+
+            if (!local_new.empty()) {
+                std::lock_guard lock(new_pairs_mtx);
+                for (auto p : local_new) new_pairs.push_back(p);
+            }
+        });
+
+    for (auto [i, j] : new_pairs)
+        forces.push_back(std::make_unique<Manifold>(this, i, j));
 
     stats.num_forces = (uint32_t)forces.size();
 
@@ -142,23 +167,28 @@ void PhysicsWorld::solve(float dt) {
     auto start = std::chrono::system_clock::now();
 
     // Warm-start forces (initializes contacts, Jacobians, dual variables).
-    for (auto& f : forces) {
-        if (!f->initialize()) {
-            f.reset();
-            continue;
-        }
-        for (int i = 0; i < f->rows(); i++) {
-            if (postStabilize) {
-                f->penalty[i] = std::clamp(f->penalty[i] * gamma, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
-            } else {
-                f->lambda[i]  = f->lambda[i] * alpha * gamma;
-                f->penalty[i] = std::clamp(f->penalty[i] * gamma, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    std::for_each(std::execution::par, forces.begin(), forces.end(),
+        [&](std::unique_ptr<Force>& f) {
+            if (!f->initialize()) { f.reset(); return; }
+            for (int i = 0; i < f->rows(); i++) {
+                if (postStabilize) {
+                    f->penalty[i] = std::clamp(f->penalty[i] * gamma, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+                } else {
+                    f->lambda[i]  = f->lambda[i] * alpha * gamma;
+                    f->penalty[i] = std::clamp(f->penalty[i] * gamma, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+                }
+                f->penalty[i] = std::min(f->penalty[i], f->stiffness[i]);
             }
-            f->penalty[i] = std::min(f->penalty[i], f->stiffness[i]);
-        }
-    }
+        });
     forces.erase(std::remove_if(forces.begin(), forces.end(),
         [](const std::unique_ptr<Force>& f) { return !f; }), forces.end());
+
+    // Build per-body adjacency list so the solver doesn't scan all forces per body.
+    std::vector<std::vector<Force*>> body_forces(bodies.size());
+    for (auto& f : forces) {
+        body_forces[f->bodyA].push_back(f.get());
+        body_forces[f->bodyB].push_back(f.get());
+    }
 
     auto t1 = std::chrono::system_clock::now();
     stats.warmstart_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
@@ -188,6 +218,18 @@ void PhysicsWorld::solve(float dt) {
     auto t2 = std::chrono::system_clock::now();
     stats.predict_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
 
+    // Pre-group dynamic bodies by color. Falls back to a single group
+    uint32_t numColors = colors.empty() ? 1u : (max_color + 1u);
+    std::vector<std::vector<uint32_t>> color_groups(numColors);
+    for (uint32_t bi = 0; bi < (uint32_t)bodies.size(); bi++) {
+        if (!active[bi] || bodies[bi].inv_mass == 0.f) continue;
+        uint32_t c = colors.empty() ? 0u : colors[bi];
+        if (c < numColors)
+            color_groups[c].push_back(bi);
+    }
+
+    std::vector<glm::vec3> x_new(bodies.size());
+
     // Main solver loop.
     int totalIterations = iterations + (postStabilize ? 1 : 0);
 
@@ -196,51 +238,63 @@ void PhysicsWorld::solve(float dt) {
         if (postStabilize)
             currentAlpha = (it < iterations) ? 1.f : 0.f;
 
-        for (uint32_t bi = 0; bi < (uint32_t)bodies.size(); bi++) {
-            if (!active[bi] || bodies[bi].inv_mass == 0.f) continue;
-            RigidBody2& rb = bodies[bi];
+        // Steps 8-25: color loop — all vertices in a color update simultaneously.
+        for (uint32_t c = 0; c < numColors; c++) {
+            // Steps 9-20: compute x_new for each body in this color 
+            std::for_each(std::execution::par_unseq,
+                color_groups[c].begin(), color_groups[c].end(),
+                [&](uint32_t bi) {
+                    RigidBody2& rb = bodies[bi];
 
-            Mat3      lhs = mat3_diag(rb.mass, rb.mass, rb.inertia) / (dt * dt);
-            glm::vec3 rhs = lhs * (rb.position - rb.inertial);
+                    Mat3      lhs = mat3_diag(rb.mass, rb.mass, rb.inertia) / (dt * dt);
+                    glm::vec3 rhs = lhs * (rb.position - rb.inertial);
 
-            for (auto& f : forces) {
-                if (f->bodyA != bi && f->bodyB != bi) continue;
+                    for (Force* f : body_forces[bi]) {
+                        f->computeConstraint(currentAlpha);
+                        f->computeDerivatives(bi);
 
-                f->computeConstraint(currentAlpha);
-                f->computeDerivatives(bi);
+                        for (int i = 0; i < f->rows(); i++) {
+                            float lam       = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
+                            float force_val = std::clamp(f->penalty[i] * f->C[i] + lam,
+                                                         f->fmin[i], f->fmax[i]);
 
-                for (int i = 0; i < f->rows(); i++) {
-                    float lam       = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
-                    float force_val = std::clamp(f->penalty[i] * f->C[i] + lam,
-                                                 f->fmin[i], f->fmax[i]);
+                            Mat3 G = mat3_diag(glm::length(f->H[i].col(0)),
+                                               glm::length(f->H[i].col(1)),
+                                               glm::length(f->H[i].col(2))) * std::abs(force_val);
 
-                    Mat3 G = mat3_diag(glm::length(f->H[i].col(0)),
-                                       glm::length(f->H[i].col(1)),
-                                       glm::length(f->H[i].col(2))) * std::abs(force_val);
+                            rhs += f->J[i] * force_val;
+                            lhs += mat3_outer(f->J[i], f->J[i] * f->penalty[i]) + G;
+                        }
+                    }
 
-                    rhs += f->J[i] * force_val;
-                    lhs += mat3_outer(f->J[i], f->J[i] * f->penalty[i]) + G;
-                }
-            }
+                    x_new[bi] = rb.position - mat3_solve(lhs, rhs);
+                });
 
-            rb.position -= mat3_solve(lhs, rhs);
+            // Steps 22-24: apply buffered positions for this color 
+            std::for_each(std::execution::par_unseq,
+                color_groups[c].begin(), color_groups[c].end(),
+                [&](uint32_t bi) {
+                    bodies[bi].position = x_new[bi];
+                });
         }
 
+        // Steps 26-35: lambda and penalty update over all forces 
         if (it < iterations) {
-            for (auto& f : forces) {
-                f->computeConstraint(currentAlpha);
-                for (int i = 0; i < f->rows(); i++) {
-                    float lam    = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
-                    f->lambda[i] = std::clamp(f->penalty[i] * f->C[i] + lam,
-                                              f->fmin[i], f->fmax[i]);
+            std::for_each(std::execution::par_unseq,
+                forces.begin(), forces.end(),
+                [&](const std::unique_ptr<Force>& f) {
+                    f->computeConstraint(currentAlpha);
+                    for (int i = 0; i < f->rows(); i++) {
+                        float lam    = std::isinf(f->stiffness[i]) ? f->lambda[i] : 0.f;
+                        f->lambda[i] = std::clamp(f->penalty[i] * f->C[i] + lam,
+                                                  f->fmin[i], f->fmax[i]);
 
-                    if (f->lambda[i] > f->fmin[i] && f->lambda[i] < f->fmax[i])
-                        f->penalty[i] = std::min(f->penalty[i] + beta * std::abs(f->C[i]),
-                                                 std::min(AVBD_PENALTY_MAX, f->stiffness[i]));
-                }
-            }
+                        if (f->lambda[i] > f->fmin[i] && f->lambda[i] < f->fmax[i])
+                            f->penalty[i] = std::min(f->penalty[i] + beta * std::abs(f->C[i]),
+                                                     std::min(AVBD_PENALTY_MAX, f->stiffness[i]));
+                    }
+                });
         }
-
     }
 
     for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {

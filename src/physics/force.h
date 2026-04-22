@@ -11,8 +11,8 @@
 static constexpr int   AVBD_MAX_ROWS    = 4;
 static constexpr float AVBD_PENALTY_MIN = 1.f;
 static constexpr float AVBD_PENALTY_MAX = 1e9f;
-static constexpr float AVBD_ALPHA       = 0.99f;   
-static constexpr float AVBD_BETA        = 100000.f; 
+static constexpr float AVBD_ALPHA       = 0.95f;   
+static constexpr float AVBD_BETA        = 50000.f; 
 static constexpr float AVBD_GAMMA       = 0.99f;  
 
 // ─── Row-major 3×3 matrix (from avbd implementation) ─────────────

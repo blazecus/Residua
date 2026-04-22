@@ -76,12 +76,10 @@ public:
         VkPipeline            pipeline{VK_NULL_HANDLE};
         VkPipelineLayout      layout{VK_NULL_HANDLE};
         VkDescriptorSetLayout desc_layout{VK_NULL_HANDLE};
-    } draw_pl, gap_fill_pl, contact_draw_pl;
+    } draw_pl, gap_fill_pl;
 
     VkDescriptorSet     draw_desc{VK_NULL_HANDLE};
     VkDescriptorSet     gap_fill_desc{VK_NULL_HANDLE};
-    VkDescriptorSet     contact_draw_desc{VK_NULL_HANDLE};
-    AllocatedBuffer     contact_pt_buf;
     DescriptorAllocator desc_allocator;
 
     struct BodyGPUInfo {

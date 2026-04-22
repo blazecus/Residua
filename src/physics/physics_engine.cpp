@@ -10,7 +10,6 @@
 #include <cstdlib>
 #include <glm/gtx/rotate_vector.hpp>
 
-static constexpr uint32_t MAX_CONTACT_PTS = 1024;
 
 static VkPipeline make_compute_pipeline(VkDevice device, const char* spv,
                                         VkPipelineLayout layout)
@@ -266,39 +265,6 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         w.update_set(device, manifold_gen_desc);
     }
 
-    // ── Contact-draw pipeline ─────────────────────────────────────────────────
-    {
-        auto& pl = contact_draw_pl;
-        DescriptorLayoutBuilder b;
-        b.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // contact_pt_buf
-        b.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);  // output_screen
-        pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
-        VkPipelineLayoutCreateInfo li {
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &pl.desc_layout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pc,
-        };
-        VK_CHECK(vkCreatePipelineLayout(device, &li, nullptr, &pl.layout));
-        pl.pipeline = make_compute_pipeline(device,
-            "../shaders/contact_draw.comp.spv", pl.layout);
-
-        contact_pt_buf = engine->create_buffer(
-            MAX_CONTACT_PTS * sizeof(glm::vec2),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-
-        contact_draw_desc = desc_allocator.allocate(device, pl.desc_layout);
-        DescriptorWriter w;
-        w.write_buffer(0, contact_pt_buf.buffer, MAX_CONTACT_PTS * sizeof(glm::vec2), 0,
-                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-        w.write_image(1, output_screen.imageView, VK_NULL_HANDLE,
-                      VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        w.update_set(device, contact_draw_desc);
-    }
-
     // ── Body-coloring pipeline (Jones-Plassmann) ─────────────────────────────
     {
         auto& pl = coloring_pl;
@@ -353,17 +319,14 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         vkDestroyPipeline(device, draw_pl.pipeline,              nullptr);
         vkDestroyPipeline(device, gap_fill_pl.pipeline,          nullptr);
         vkDestroyPipeline(device, manifold_gen_pl.pipeline,      nullptr);
-        vkDestroyPipeline(device, contact_draw_pl.pipeline,      nullptr);
         vkDestroyPipeline(device, coloring_pl.pipeline,          nullptr);
         vkDestroyPipelineLayout(device, draw_pl.layout,              nullptr);
         vkDestroyPipelineLayout(device, gap_fill_pl.layout,          nullptr);
         vkDestroyPipelineLayout(device, manifold_gen_pl.layout,      nullptr);
-        vkDestroyPipelineLayout(device, contact_draw_pl.layout,      nullptr);
         vkDestroyPipelineLayout(device, coloring_pl.layout,          nullptr);
         vkDestroyDescriptorSetLayout(device, draw_pl.desc_layout,         nullptr);
         vkDestroyDescriptorSetLayout(device, gap_fill_pl.desc_layout,     nullptr);
         vkDestroyDescriptorSetLayout(device, manifold_gen_pl.desc_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device, contact_draw_pl.desc_layout, nullptr);
         vkDestroyDescriptorSetLayout(device, coloring_pl.desc_layout,     nullptr);
         desc_allocator.destroy_pool(device);
     });
@@ -764,60 +727,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gap_pc), &gap_pc);
     vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
 
-    // 8. Collect active contact points from solved manifolds.
-    auto* pt_ptr = static_cast<glm::vec2*>(contact_pt_buf.info.pMappedData);
-    uint32_t contact_pt_count = 0;
-    for (auto& f : world.forces) {
-        Manifold* m = dynamic_cast<Manifold*>(f.get());
-        if (!m || m->numContacts == 0) continue;
-        const RigidBody2& ba = world.bodies[m->bodyA];
-        for (int i = 0; i < m->numContacts && contact_pt_count < MAX_CONTACT_PTS; i++) {
-            glm::vec2 rAW = glm::rotate(m->contacts[i].rA, ba.position.z);
-            pt_ptr[contact_pt_count++] = glm::vec2(ba.position) + rAW;
-        }
-    }
-    world.stats.num_contacts = contact_pt_count;
-
-    if (contact_pt_count > 0 && contact_draw_pl.pipeline != VK_NULL_HANDLE) {
-        // Barrier: gap_fill write + host write → contact_draw read.
-        VkImageMemoryBarrier2 img_gap_barrier {
-            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
-            .image            = output_screen.image,
-            .subresourceRange = full_range,
-        };
-        VkBufferMemoryBarrier2 buf_host_barrier {
-            .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-            .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-            .buffer        = contact_pt_buf.buffer,
-            .offset        = 0,
-            .size          = contact_pt_count * sizeof(glm::vec2),
-        };
-        VkDependencyInfo dep3 {
-            .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers    = &buf_host_barrier,
-            .imageMemoryBarrierCount  = 1,
-            .pImageMemoryBarriers     = &img_gap_barrier,
-        };
-        vkCmdPipelineBarrier2(cmd, &dep3);
-
-        // 9. Contact-draw pass — one thread per contact point.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, contact_draw_pl.pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            contact_draw_pl.layout, 0, 1, &contact_draw_desc, 0, nullptr);
-        vkCmdPushConstants(cmd, contact_draw_pl.layout,
-            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &contact_pt_count);
-        vkCmdDispatch(cmd, contact_pt_count, 1, 1);
-    }
 }
 
 PhysicsStats PhysicsEngine::get_stats(){
