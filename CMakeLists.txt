@@ -18,6 +18,10 @@ add_executable (Residua
   src/game/input_manager.h
   src/game/game.cpp
   src/game/game.h
+  src/game/scenes.cpp
+  src/game/scenes.h
+  src/game/ui.cpp
+  src/game/ui.h
   src/game/client.cpp
   src/game/client.h
   src/renderer/residua_engine.cpp
@@ -48,6 +52,8 @@ add_executable (Residua
   src/physics/manifold.cpp
   src/physics/manifold.h
   src/physics/force.h
+  src/physics/joint.cpp
+  src/physics/joint.h
   src/physics/physics_engine.cpp
   src/physics/physics_engine.h
 )

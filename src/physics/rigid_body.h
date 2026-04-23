@@ -20,11 +20,19 @@ struct RigidBody2 {
 
     glm::vec2 com_local{0.f};  
 
-    float mass{1.f};
-    float inertia{1.f};
-    float inv_mass{1.f};
-    float inv_inertia{1.f};
-    float friction{0.3f};
+    float    density{1.f};
+    float    mass{1.f};
+    float    inertia{1.f};
+    float    inv_mass{1.f};
+    float    inv_inertia{1.f};
+    float    friction{0.3f};
+    float    angular_damping{1.f};   
+
+    uint32_t collision_layer{0x00000001u};
+    uint32_t collision_mask {0xFFFFFFFFu};
+
+    // Bodies connected by non-contact forces (joints). Maintained incrementally
+    std::vector<uint32_t> joint_connected;
 
     void generate_shape();
     void generate_sdf();

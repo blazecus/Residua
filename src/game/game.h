@@ -1,6 +1,8 @@
 #pragma once
 
 #include <src/game/client.h>
+#include <src/game/scenes.h>
+#include <src/game/ui.h>
 #include <src/renderer/residua_engine.h>
 #include <src/physics/physics_engine.h>
 #include <src/physics/body_image.h>
@@ -34,6 +36,9 @@ public:
     LoadedBodyImage ball_image;
     LoadedBodyImage cshape;
     LoadedBodyImage star;
+
+    SceneManager scene_manager;
+    UIManager    ui_manager;
 
     void SDL_setup();
     void init();

@@ -23,7 +23,8 @@ struct Manifold : Force {
 
     Manifold(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB);
 
-    int  rows() const override { return numContacts * 2; }
+    int  rows()       const override { return numContacts * 2; }
+    bool is_contact() const override { return true; }
     bool initialize()                           override;
     void computeConstraint(float alpha)         override;
     void computeDerivatives(uint32_t body_idx) override;

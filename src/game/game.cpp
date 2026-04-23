@@ -27,27 +27,13 @@ void Game::init() {
     cpu_physics.init(&engine);
     engine.cpu_physics = &cpu_physics;
 
-    const float W = float(PHYSICS_WIDTH);
-    const float H = float(PHYSICS_HEIGHT);
-    const float T = 20.f;  
-    cpu_physics.add_static_rect(&engine, { W * 0.5f, H + T * 0.5f }, W, T);  // floor
-    cpu_physics.add_static_rect(&engine, { W * 0.5f, -T * 0.5f    }, W, T);  // ceiling
-    cpu_physics.add_static_rect(&engine, { -T * 0.5f, H * 0.5f    }, T, H);  // left wall
-    cpu_physics.add_static_rect(&engine, { W + T * 0.5f, H * 0.5f }, T, H);  // right wall
+    scene_manager.init(&cpu_physics, &engine, &ball_image, &cshape, &star);
+    ui_manager.init(&scene_manager, &cpu_physics);
+    engine.ui_callback = [this]() { ui_manager.draw(); };
+
+    scene_manager.load(0);
 
     lastFrame = std::chrono::system_clock::now();
-}
-
-static void spawn_body(PhysicsEngine& cpu, ResiduaEngine& engine,
-                       const LoadedBodyImage& img, glm::vec2 world_pos)
-{
-    RigidBody2 rb;
-    rb.sprite = img;
-    rb.compute_mass_properties();  
-    rb.generate_shape();  
-    rb.generate_sdf();
-    rb.position = glm::vec3(world_pos, 0.f);
-    cpu.add_body(&engine, std::move(rb));
 }
 
 void Game::run() {
@@ -80,7 +66,6 @@ void Game::run() {
 
         client.update();
 
-        // Get mouse position in physics-space coords.
         auto physics_mouse = [&]() -> glm::vec2 {
             int mx, my;
             SDL_GetMouseState(&mx, &my);
@@ -91,19 +76,21 @@ void Game::run() {
         };
 
         if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 20) {
-            spawn_body(cpu_physics, engine, ball_image, physics_mouse());
+            scene_manager.spawn_body(ball_image, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
-            spawn_body(cpu_physics, engine, cshape, physics_mouse());
+            scene_manager.spawn_body(cshape, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 30) {
-            spawn_body(cpu_physics, engine, star, physics_mouse());
+            scene_manager.spawn_body(star, physics_mouse());
             lastSpawn = 0;
         }
 
         if (input.blou(InputManager::InputType::INSPECT)) {
-            if (auto hit = cpu_physics.body_at(physics_mouse()))
-                cpu_physics.remove_body(*hit);
+            if (auto hit = cpu_physics.body_at(physics_mouse())) {
+                if (cpu_physics.world.bodies[*hit].inv_mass > 0.f) // rbs only
+                    cpu_physics.remove_body(*hit);
+            }
         }
 
         lastSpawn++;

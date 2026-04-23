@@ -161,6 +161,7 @@ TextureCache texCache;
 
     PhysicsEngine*   cpu_physics { nullptr };
     float _dt { 0.007f };
+    std::function<void()> ui_callback;
     bool freeze_rendering { false };
 
     void set_window(SDL_Window* window, VkExtent2D& extent);

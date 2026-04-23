@@ -269,6 +269,8 @@ void ResiduaEngine::draw_frame() {
 
 	ImGui::NewFrame();
 
+	if (ui_callback) ui_callback();
+
 	ImGui::Begin("Stats");
 
     auto physics_stats = cpu_physics->get_stats();

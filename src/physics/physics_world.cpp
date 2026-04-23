@@ -51,6 +51,15 @@ uint32_t PhysicsWorld::add_body(RigidBody2& rb) {
 void PhysicsWorld::remove_body(uint32_t index) {
     active[index] = false;
     open_slots.push_back(index);
+
+    // Remove index from every body it was joint-connected to.
+    for (uint32_t nb : bodies[index].joint_connected) {
+        if (nb >= bodies.size()) continue;
+        auto& jc = bodies[nb].joint_connected;
+        jc.erase(std::remove(jc.begin(), jc.end(), index), jc.end());
+    }
+    bodies[index].joint_connected.clear();
+
     // Remove any forces referencing this body.
     forces.erase(
         std::remove_if(forces.begin(), forces.end(),
@@ -58,6 +67,15 @@ void PhysicsWorld::remove_body(uint32_t index) {
                 return f->bodyA == index || f->bodyB == index;
             }),
         forces.end());
+}
+
+void PhysicsWorld::add_force(std::unique_ptr<Force> f) {
+    if (!f->is_contact()) {
+        uint32_t a = f->bodyA, b = f->bodyB;
+        if (a < bodies.size()) bodies[a].joint_connected.push_back(b);
+        if (b < bodies.size()) bodies[b].joint_connected.push_back(a);
+    }
+    forces.push_back(std::move(f));
 }
 
 uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
@@ -116,10 +134,11 @@ void PhysicsWorld::prepare() {
     auto t1 = std::chrono::system_clock::now();
     stats.lbvh_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
 
-    // Build O(1) lookup for already-existing manifold pairs.
+    // Build O(1) lookup for already-existing contact manifold pairs.
     std::unordered_set<uint64_t> existing;
     existing.reserve(forces.size() * 2);
     for (const auto& f : forces) {
+        if (!f->is_contact()) continue;
         uint32_t a = std::min(f->bodyA, f->bodyB);
         uint32_t b = std::max(f->bodyA, f->bodyB);
         existing.insert(((uint64_t)a << 32) | b);
@@ -143,6 +162,15 @@ void PhysicsWorld::prepare() {
                 if (lj <= (int)li) continue;
                 uint32_t i = index_map[li];
                 uint32_t j = index_map[lj];
+                const RigidBody2& bi = bodies[i];
+                const RigidBody2& bj = bodies[j];
+                if (!(bi.collision_layer & bj.collision_mask)) continue;
+                if (!(bj.collision_layer & bi.collision_mask)) continue;
+                {
+                    bool joint_skip = false;
+                    for (uint32_t c : bi.joint_connected) if (c == j) { joint_skip = true; break; }
+                    if (joint_skip) continue;
+                }
                 uint32_t a = std::min(i, j), b = std::max(i, j);
                 if (!existing.count(((uint64_t)a << 32) | b))
                     local_new.push_back({i, j});
@@ -199,6 +227,8 @@ void PhysicsWorld::solve(float dt) {
         RigidBody2& rb = bodies[i];
 
         rb.velocity.z = std::clamp(rb.velocity.z, -50.f, 50.f);
+        if (rb.inv_mass > 0.f)
+            rb.velocity.z *= rb.angular_damping;
 
         rb.inertial = rb.position + rb.velocity * dt;
         if (rb.inv_mass > 0.f)
