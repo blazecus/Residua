@@ -30,7 +30,7 @@ struct PhysicsWorld {
     float alpha     { AVBD_ALPHA };
     float beta      { AVBD_BETA  };
     float gamma     { AVBD_GAMMA };
-    int   iterations{ 10 };
+    int   iterations{ 15 };
     bool  postStabilize{ true };
 
     std::vector<RigidBody2>  bodies;

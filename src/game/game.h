@@ -24,7 +24,7 @@ public:
 
     glm::vec2 temp_player_position = glm::vec2(0.0f);
 
-    uint16_t fps = 144;
+    uint16_t fps = 60;
     float delta = 1.0f / fps;
     std::chrono::microseconds frameTime{ 1000000 / fps };
     std::chrono::system_clock::time_point lastFrame;

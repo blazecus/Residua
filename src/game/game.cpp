@@ -28,7 +28,7 @@ void Game::init() {
     engine.cpu_physics = &cpu_physics;
 
     scene_manager.init(&cpu_physics, &engine, &ball_image, &cshape, &star);
-    ui_manager.init(&scene_manager, &cpu_physics);
+    ui_manager.init(&scene_manager, &cpu_physics, &engine);
     engine.ui_callback = [this]() { ui_manager.draw(); };
 
     scene_manager.load(0);
@@ -75,7 +75,7 @@ void Game::run() {
             };
         };
 
-        if (input.blou(InputManager::InputType::SELECT) && lastSpawn > 20) {
+        if (input.blou(InputManager::InputType::FORWARD) && lastSpawn > 20) {
             scene_manager.spawn_body(ball_image, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
