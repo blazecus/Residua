@@ -1,4 +1,6 @@
 #include <src/game/game.h>
+#include <imgui.h>
+#include <glm/gtx/rotate_vector.hpp>
 
 void Game::SDL_setup() {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
@@ -43,6 +45,15 @@ void Game::run() {
 
     while (!bQuit) {
 
+        auto physics_mouse = [&]() -> glm::vec2 {
+            int mx, my;
+            SDL_GetMouseState(&mx, &my);
+            return {
+                mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
+                my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+            };
+        };
+
         client.resetInput();
         while (SDL_PollEvent(&e) != 0) {
             if (e.type == SDL_QUIT)
@@ -52,8 +63,47 @@ void Game::run() {
                 if (e.window.event == SDL_WINDOWEVENT_MINIMIZED) freeze_rendering = true;
                 if (e.window.event == SDL_WINDOWEVENT_RESTORED)  freeze_rendering = false;
             }
+
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT
+                    && !ImGui::GetIO().WantCaptureMouse) {
+                glm::vec2 mpos = {
+                    e.button.x * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
+                    e.button.y * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+                };
+                if (auto hit = cpu_physics.body_at(mpos)) {
+                    auto& body = cpu_physics.world.bodies[*hit];
+                    if (body.inv_mass > 0.f) {
+                        drag_body  = *hit;
+                        glm::vec2 r_local = glm::rotate(mpos - glm::vec2(body.position),
+                                                        -body.position.z);
+                        auto* f = new MouseDrag(&cpu_physics.world, drag_body,
+                                                r_local, mpos, 20000.f);
+                        drag_force = f;
+                        cpu_physics.world.add_force(std::unique_ptr<Force>(f));
+                    }
+                }
+            }
+
+            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT && drag_force) {
+                cpu_physics.world.remove_force(drag_force);
+                drag_force = nullptr;
+                drag_body  = ~0u;
+            }
+
             engine.process_renderer_input(e);
             client.processSDLEvent(e);
+        }
+
+        // Keep drag target in sync with mouse; cancel if body was removed.
+        if (drag_force) {
+            if (drag_body < cpu_physics.world.bodies.size()
+                    && cpu_physics.world.active[drag_body]) {
+                drag_force->target = physics_mouse();
+            } else {
+                cpu_physics.world.remove_force(drag_force);
+                drag_force = nullptr;
+                drag_body  = ~0u;
+            }
         }
 
         auto input = client.inputManager.getInputs();
@@ -65,15 +115,6 @@ void Game::run() {
         engine.process_player_update(temp_player_position);
 
         client.update();
-
-        auto physics_mouse = [&]() -> glm::vec2 {
-            int mx, my;
-            SDL_GetMouseState(&mx, &my);
-            return {
-                mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
-                my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
-            };
-        };
 
         if (input.blou(InputManager::InputType::FORWARD) && lastSpawn > 20) {
             scene_manager.spawn_body(ball_image, physics_mouse());

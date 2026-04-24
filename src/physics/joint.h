@@ -20,6 +20,21 @@ struct DistanceJoint : Force {
     void computeDerivatives(uint32_t bi)    override;
 };
 
+// Interactive mouse drag — constrains a body's local point to a world-space target.
+// bodyB is unused (UINT32_MAX sentinel); update target each frame before stepping.
+struct MouseDrag : Force {
+    glm::vec2 r_local;
+    glm::vec2 target;
+
+    MouseDrag(PhysicsWorld* world, uint32_t bodyA,
+              glm::vec2 r_local, glm::vec2 target, float stiffness);
+
+    int  rows() const override { return 2; }
+    bool initialize()                    override;
+    void computeConstraint(float alpha)  override;
+    void computeDerivatives(uint32_t bi) override;
+};
+
 struct Spring : Force {
     glm::vec2 rA_local;
     glm::vec2 rB_local;

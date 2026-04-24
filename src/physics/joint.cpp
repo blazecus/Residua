@@ -67,6 +67,39 @@ void DistanceJoint::computeDerivatives(uint32_t bi) {
     }
 }
 
+// ─── MouseDrag ────────────────────────────────────────────────────────────────
+
+MouseDrag::MouseDrag(PhysicsWorld* world, uint32_t bodyA,
+                     glm::vec2 r_local, glm::vec2 target, float stiffness)
+    : Force(world, bodyA, ~0u), r_local(r_local), target(target)
+{
+    this->stiffness[0] = this->stiffness[1] = stiffness;
+    this->penalty[0]   = this->penalty[1]   = stiffness;
+}
+
+bool MouseDrag::initialize() {
+    return bodyA < world->bodies.size() && world->active[bodyA];
+}
+
+void MouseDrag::computeConstraint(float /*alpha*/) {
+    const RigidBody2& ba = world->bodies[bodyA];
+    glm::vec2 rAw = glm::rotate(r_local, ba.position.z);
+    glm::vec2 pA  = glm::vec2(ba.position) + rAw;
+    C[0] = pA.x - target.x;
+    C[1] = pA.y - target.y;
+}
+
+void MouseDrag::computeDerivatives(uint32_t bi) {
+    if (bi != bodyA) return;
+    glm::vec2 rAw = glm::rotate(r_local, world->bodies[bodyA].position.z);
+    J[0] = {  1.f, 0.f, -rAw.y };
+    J[1] = {  0.f, 1.f,  rAw.x };
+    H[0] = {}; H[0].row[2].z = -rAw.x;
+    H[1] = {}; H[1].row[2].z = -rAw.y;
+}
+
+// ─── Spring ───────────────────────────────────────────────────────────────────
+
 Spring::Spring(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB,
                glm::vec2 rA_local, glm::vec2 rB_local,
                float rest_length, float stiffness)

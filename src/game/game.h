@@ -5,6 +5,7 @@
 #include <src/game/ui.h>
 #include <src/renderer/residua_engine.h>
 #include <src/physics/physics_engine.h>
+#include <src/physics/joint.h>
 #include <src/physics/body_image.h>
 #include <chrono>
 
@@ -29,7 +30,9 @@ public:
     std::chrono::microseconds frameTime{ 1000000 / fps };
     std::chrono::system_clock::time_point lastFrame;
 
-    uint32_t lastSpawn = 0;
+    uint32_t   lastSpawn  = 0;
+    uint32_t   drag_body  { ~0u };
+    MouseDrag* drag_force { nullptr };
 
     Client client;
 

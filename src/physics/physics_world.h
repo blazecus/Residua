@@ -53,6 +53,7 @@ struct PhysicsWorld {
     uint32_t    add_static_rect(glm::vec2 center, float w, float h);
     void        remove_body(uint32_t index);
     void        add_force(std::unique_ptr<Force> f);
+    void        remove_force(Force* f);
     RigidBody2& get_body(uint32_t index);
 
     void prepare();

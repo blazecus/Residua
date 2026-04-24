@@ -72,10 +72,18 @@ void PhysicsWorld::remove_body(uint32_t index) {
 void PhysicsWorld::add_force(std::unique_ptr<Force> f) {
     if (!f->is_contact()) {
         uint32_t a = f->bodyA, b = f->bodyB;
-        if (a < bodies.size()) bodies[a].joint_connected.push_back(b);
-        if (b < bodies.size()) bodies[b].joint_connected.push_back(a);
+        if (a < bodies.size() && b < bodies.size()) {
+            bodies[a].joint_connected.push_back(b);
+            bodies[b].joint_connected.push_back(a);
+        }
     }
     forces.push_back(std::move(f));
+}
+
+void PhysicsWorld::remove_force(Force* f) {
+    auto it = std::find_if(forces.begin(), forces.end(),
+        [f](const std::unique_ptr<Force>& p) { return p.get() == f; });
+    if (it != forces.end()) forces.erase(it);
 }
 
 uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
@@ -215,7 +223,8 @@ void PhysicsWorld::solve(float dt) {
     std::vector<std::vector<Force*>> body_forces(bodies.size());
     for (auto& f : forces) {
         body_forces[f->bodyA].push_back(f.get());
-        body_forces[f->bodyB].push_back(f.get());
+        if (f->bodyB < bodies.size())
+            body_forces[f->bodyB].push_back(f.get());
     }
 
     auto t1 = std::chrono::system_clock::now();
