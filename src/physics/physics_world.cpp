@@ -317,7 +317,7 @@ void PhysicsWorld::solve(float dt) {
                 });
         }
 
-        // Steps 26-35: lambda and penalty update over all forces 
+        // Steps 26-35: lambda and penalty update over all forces
         if (it < iterations) {
             std::for_each(std::execution::par_unseq,
                 forces.begin(), forces.end(),
@@ -334,14 +334,16 @@ void PhysicsWorld::solve(float dt) {
                     }
                 });
         }
-    }
 
-    for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
-        if (!active[i]) continue;
-        RigidBody2& rb = bodies[i];
-        rb.prev_velocity = rb.velocity;
-        if (rb.inv_mass > 0.f)
-            rb.velocity = (rb.position - rb.initial) / dt;
+        if (it == iterations - 1) {
+            for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
+                if (!active[i]) continue;
+                RigidBody2& rb = bodies[i];
+                rb.prev_velocity = rb.velocity;
+                if (rb.inv_mass > 0.f)
+                    rb.velocity = (rb.position - rb.initial) / dt;
+            }
+        }
     }
 
     auto t3 = std::chrono::system_clock::now();

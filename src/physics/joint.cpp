@@ -15,6 +15,16 @@ DistanceJoint::DistanceJoint(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB
         this->penalty[i]   = pos_start;
     }
 
+    glm::vec2 sA = (bodyA < world->bodies.size())
+        ? glm::vec2(world->bodies[bodyA].sprite.width, world->bodies[bodyA].sprite.height)
+        : glm::vec2(0.f);
+    glm::vec2 sB = (bodyB < world->bodies.size())
+        ? glm::vec2(world->bodies[bodyB].sprite.width, world->bodies[bodyB].sprite.height)
+        : glm::vec2(0.f);
+    glm::vec2 sum = sA + sB;
+    torqueArm = glm::dot(sum, sum);
+    if (torqueArm < 1.f) torqueArm = 1.f;
+
     if (bend_stiffness > 0.f) {
         this->stiffness[2] = bend_stiffness;
         this->penalty[2]   = bend_stiffness;
@@ -25,10 +35,22 @@ DistanceJoint::DistanceJoint(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB
 }
 
 bool DistanceJoint::initialize() {
-    return world->active[bodyA] && world->active[bodyB];
+    if (!world->active[bodyA] || !world->active[bodyB]) return false;
+
+    const RigidBody2& ba = world->bodies[bodyA];
+    const RigidBody2& bb = world->bodies[bodyB];
+
+    glm::vec2 pA = glm::vec2(ba.position) + glm::rotate(rA_local, ba.position.z);
+    glm::vec2 pB = glm::vec2(bb.position) + glm::rotate(rB_local, bb.position.z);
+    C0[0] = pA.x - pB.x;
+    C0[1] = pA.y - pB.y;
+    if (bend_stiffness > 0.f)
+        C0[2] = (ba.position.z - bb.position.z - rest_angle) * torqueArm;
+
+    return true;
 }
 
-void DistanceJoint::computeConstraint(float /*alpha*/) {
+void DistanceJoint::computeConstraint(float alpha) {
     const RigidBody2& ba = world->bodies[bodyA];
     const RigidBody2& bb = world->bodies[bodyB];
 
@@ -38,11 +60,13 @@ void DistanceJoint::computeConstraint(float /*alpha*/) {
     glm::vec2 pA = glm::vec2(ba.position) + rAw;
     glm::vec2 pB = glm::vec2(bb.position) + rBw;
 
-    C[0] = pA.x - pB.x;
-    C[1] = pA.y - pB.y;
+    float Cn[3];
+    Cn[0] = pA.x - pB.x;
+    Cn[1] = pA.y - pB.y;
+    Cn[2] = (ba.position.z - bb.position.z - rest_angle) * torqueArm;
 
-    if (bend_stiffness > 0.f)
-        C[2] = (ba.position.z - bb.position.z) - rest_angle;
+    for (int i = 0; i < rows(); i++)
+        C[i] = std::isinf(stiffness[i]) ? Cn[i] - C0[i] * alpha : Cn[i];
 }
 
 void DistanceJoint::computeDerivatives(uint32_t bi) {
@@ -51,19 +75,20 @@ void DistanceJoint::computeDerivatives(uint32_t bi) {
 
         J[0] = {  1.f,  0.f, -rAw.y };
         J[1] = {  0.f,  1.f,  rAw.x };
+        J[2] = { 0.f, 0.f, torqueArm };
         H[0] = {}; H[0].row[2].z = -rAw.x;
         H[1] = {}; H[1].row[2].z = -rAw.y;
+        H[2] = {};
 
-        if (bend_stiffness > 0.f) { J[2] = { 0.f, 0.f, 1.f }; H[2] = {}; }
     } else {
         glm::vec2 rBw = glm::rotate(rB_local, world->bodies[bodyB].position.z);
 
         J[0] = { -1.f,  0.f,  rBw.y };
         J[1] = {  0.f, -1.f, -rBw.x };
-        H[0] = {}; H[0].row[2].z = -rBw.x;
-        H[1] = {}; H[1].row[2].z = -rBw.y;
-
-        if (bend_stiffness > 0.f) { J[2] = { 0.f, 0.f, -1.f }; H[2] = {}; }
+        J[2] = { 0.f, 0.f, -torqueArm };
+        H[0] = {}; H[0].row[2].z = rBw.x;
+        H[1] = {}; H[1].row[2].z = rBw.y;
+        H[2] = {};
     }
 }
 

@@ -3,7 +3,7 @@
 #include "force.h"
 
 static constexpr int   MANIFOLD_MAX_CONTACTS = 2;
-static constexpr float COLLISION_MARGIN      = 0.0005f;
+static constexpr float COLLISION_MARGIN      = 0.005f;
 static constexpr float STICK_THRESH          = 0.01f;
 
 struct Manifold : Force {
