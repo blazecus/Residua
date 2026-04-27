@@ -116,13 +116,13 @@ void Game::run() {
 
         client.update();
 
-        if (input.blou(InputManager::InputType::FORWARD) && lastSpawn > 20) {
+        if (input.blou(InputManager::InputType::FORWARD)) {
             scene_manager.spawn_body(ball_image, physics_mouse());
             lastSpawn = 0;
-        } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 10) {
+        } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 5) {
             scene_manager.spawn_body(cshape, physics_mouse());
             lastSpawn = 0;
-        } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 30) {
+        } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 10) {
             scene_manager.spawn_body(star, physics_mouse());
             lastSpawn = 0;
         }

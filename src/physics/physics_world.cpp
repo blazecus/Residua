@@ -1,5 +1,6 @@
 #include "physics_world.h"
 #include "manifold.h"
+#include "shape_gen.h"
 #include <glm/gtx/rotate_vector.hpp>
 #include <algorithm>
 #include <cmath>
@@ -110,9 +111,9 @@ uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
     img.pixels.assign(iw * ih, glm::vec4(1.f));  
 
     rb.sprite = img;
-    rb.sdf    = generate_sdf(img, rb.shape, glm::vec2(0.f));  
-    rb.sdf_w  = iw;
-    rb.sdf_h  = ih;
+    rb.sdf    = generate_sdf(img, rb.shape, glm::vec2(0.f), SDF_SCALE);
+    rb.sdf_w  = iw * SDF_SCALE;
+    rb.sdf_h  = ih * SDF_SCALE;
 
     return add_body(rb);
 }
@@ -141,6 +142,18 @@ void PhysicsWorld::prepare() {
 
     auto t1 = std::chrono::system_clock::now();
     stats.lbvh_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
+
+    // Prune contact manifolds whose body AABBs no longer overlap.
+    forces.erase(std::remove_if(forces.begin(), forces.end(),
+        [&](const std::unique_ptr<Force>& f) -> bool {
+            if (!f->is_contact()) return false;
+            uint32_t i = f->bodyA, j = f->bodyB;
+            if (i >= bodies.size() || !active[i]) return true;
+            if (j >= bodies.size() || !active[j]) return true;
+            return !AABB_intersects(compute_world_aabb(bodies[i]),
+                                    compute_world_aabb(bodies[j]));
+        }),
+        forces.end());
 
     // Build O(1) lookup for already-existing contact manifold pairs.
     std::unordered_set<uint64_t> existing;
@@ -200,6 +213,7 @@ void PhysicsWorld::prepare() {
 }
 
 void PhysicsWorld::solve(float dt) {
+    last_dt = dt;
     auto start = std::chrono::system_clock::now();
 
     // Warm-start forces (initializes contacts, Jacobians, dual variables).

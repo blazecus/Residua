@@ -29,6 +29,9 @@ std::vector<glm::vec2> generate_shape(
     float                     epsilon   = 0.5f
 );
 
+static constexpr uint32_t SDF_SCALE = 2;
+
 std::vector<float> generate_sdf(const LoadedBodyImage& img,
                                  const std::vector<glm::vec2>& shape_local,
-                                 glm::vec2 com_local);
+                                 glm::vec2 com_local,
+                                 uint32_t scale = SDF_SCALE);

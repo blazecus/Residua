@@ -43,7 +43,7 @@ bool Manifold::initialize() {
         pts = it->second;
     }
     else {
-        pts = build_manifold(ba, bb);
+        //pts = build_manifold(ba, bb);
         /*
         if (!pts.empty())
             printf("cpu fallback: %u contacts for pair (%u,%u)\n",
@@ -60,6 +60,18 @@ bool Manifold::initialize() {
         }
         retained_penalty = std::max(AVBD_PENALTY_MIN, retained_penalty * AVBD_GAMMA);
         return true;
+    }
+
+    // Floor retained_penalty at the inertial stiffness of the heavier body so the
+    // constraint is immediately strong enough to resist it on the first contact frame.
+    // TODO: remove?
+    {
+        float mass_a = ba.inv_mass > 1e-10f ? 1.f / ba.inv_mass : 0.f;
+        float mass_b = bb.inv_mass > 1e-10f ? 1.f / bb.inv_mass : 0.f;
+        float ref_mass = std::max(mass_a, mass_b);
+        float dt = world->last_dt;
+        if (ref_mass > 0.f && dt > 1e-10f)
+            retained_penalty = std::max(retained_penalty, ref_mass / (dt * dt));
     }
 
     for (int i = 0; i < numContacts; i++) {

@@ -1,5 +1,6 @@
 #include "../physics/rigid_body.h"
 #include "../physics/shape_gen.h"
+#include <algorithm>
 #include <glm/gtx/rotate_vector.hpp>
 
 AABB RigidBody2::generate_AABB() {
@@ -20,9 +21,9 @@ void RigidBody2::generate_shape() {
 }
 
 void RigidBody2::generate_sdf() {
-    sdf   = ::generate_sdf(sprite, shape, com_local);
-    sdf_w = sprite.width;
-    sdf_h = sprite.height;
+    sdf   = ::generate_sdf(sprite, shape, com_local, SDF_SCALE);
+    sdf_w = sprite.width  * SDF_SCALE;
+    sdf_h = sprite.height * SDF_SCALE;
 }
 
 void RigidBody2::compute_mass_properties(float density) {

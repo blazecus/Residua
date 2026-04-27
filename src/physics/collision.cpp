@@ -1,4 +1,5 @@
 #include "collision.h"
+#include "shape_gen.h"
 #include <glm/gtx/rotate_vector.hpp>
 #include <algorithm>
 #include <limits>
@@ -43,7 +44,8 @@ static glm::vec2 sdf_gradient(const RigidBody2& body, glm::vec2 img_pos)
 
 static glm::vec2 local_to_image(const RigidBody2& body, glm::vec2 local_pt)
 {
-    return local_pt + glm::vec2(body.sdf_w * 0.5f, body.sdf_h * 0.5f) + body.com_local;
+    float sf = (float)SDF_SCALE;
+    return local_pt * sf + body.com_local * sf + glm::vec2(body.sdf_w * 0.5f, body.sdf_h * 0.5f);
 }
 
 std::vector<ManifoldPoint> reduce_manifold(std::vector<ManifoldPoint> points, int n)
@@ -123,7 +125,8 @@ static void collect_candidates(
             else          { contact_img = img1; depth = -d1; outside_img = img1 - img0; }
         }
 
-        glm::vec2 ref_local = contact_img - glm::vec2(ref.sdf_w * 0.5f, ref.sdf_h * 0.5f) - ref.com_local;
+        float sf = (float)SDF_SCALE;
+        glm::vec2 ref_local = (contact_img - ref.com_local * sf - glm::vec2(ref.sdf_w * 0.5f, ref.sdf_h * 0.5f)) / sf;
         glm::vec2 world_pt  = glm::vec2(ref.position) + glm::rotate(ref_local, ref.position.z);
 
         out.push_back({ world_pt, depth,

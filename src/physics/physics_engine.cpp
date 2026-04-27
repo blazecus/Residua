@@ -1,4 +1,5 @@
 #include "physics_engine.h"
+#include "shape_gen.h"
 #include "../renderer/residua_engine.h"
 #include "../renderer/vk_images.h"
 #include "../renderer/vk_pipelines.h"
@@ -224,7 +225,7 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         b.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // counter_buf
         pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
 
-        struct MgenPC { uint32_t pair_count; uint32_t max_contacts; };
+        struct MgenPC { uint32_t pair_count; uint32_t max_contacts; float sdf_scale; };
         VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MgenPC) };
         VkPipelineLayoutCreateInfo li {
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -341,12 +342,13 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
     const uint32_t pixel_offset = next_pixel;
     next_pixel += n;
 
+    const uint32_t sdf_size   = body.sdf_w * body.sdf_h;
     const uint32_t sdf_offset = next_sdf_float;
-    next_sdf_float += n;
 
     uint32_t slot = world.add_body(body);
     grow_buffers(engine, (uint32_t)world.bodies.size(), next_pixel);
-    grow_sdf_buffer(engine, next_sdf_float);
+    grow_sdf_buffer(engine, next_sdf_float + sdf_size);
+    next_sdf_float += sdf_size;
 
     if (slot >= (uint32_t)body_draw_info.size())
         body_draw_info.resize(slot + 1);
@@ -365,7 +367,7 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
     std::memcpy(px_dst + pixel_offset, body.sprite.pixels.data(), n * sizeof(glm::vec4));
 
     auto* sdf_dst = static_cast<float*>(sdf_data_buf.info.pMappedData);
-    std::memcpy(sdf_dst + sdf_offset, body.sdf.data(), n * sizeof(float));
+    std::memcpy(sdf_dst + sdf_offset, body.sdf.data(), sdf_size * sizeof(float));
 
     return slot;
 }
@@ -399,6 +401,22 @@ uint32_t PhysicsEngine::add_static_rect(ResiduaEngine* engine, glm::vec2 center,
 void PhysicsEngine::remove_body(uint32_t idx)
 {
     world.remove_body(idx);
+}
+
+void PhysicsEngine::clear()
+{
+    world.bodies.clear();
+    world.active.clear();
+    world.open_slots.clear();
+    world.forces.clear();
+    world.colors.clear();
+    world.precomputed_contacts.clear();
+    world.max_color = 0;
+
+    next_pixel     = 0;
+    next_sdf_float = 0;
+    next_vert      = 0;
+    body_draw_info.clear();
 }
 
 std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
@@ -556,6 +574,11 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
             for (uint32_t i = 0; i < body_count; i++)
                 if (world.colors[i] != 0xFFFFFFFFu && world.colors[i] > world.max_color)
                     world.max_color = world.colors[i];
+        } else {
+            // Too many body slots for GPU coloring — clear so solver falls back to
+            // single sequential group (correct but unparallelized).
+            printf("too many bodies");
+            world.colors.clear();
         }
     }
 
@@ -590,8 +613,8 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     if (pair_count > 0) {
         *static_cast<uint32_t*>(counter_buf.info.pMappedData) = 0u;
 
-        struct MgenPC { uint32_t pair_count; uint32_t max_contacts; }
-            pc { pair_count, MAX_GPU_CONTACTS };
+        struct MgenPC { uint32_t pair_count; uint32_t max_contacts; float sdf_scale; }
+            pc { pair_count, MAX_GPU_CONTACTS, (float)SDF_SCALE };
 
         engine_ref->immediate_submit([&, pc](VkCommandBuffer icmd) {
             vkCmdBindPipeline(icmd, VK_PIPELINE_BIND_POINT_COMPUTE, manifold_gen_pl.pipeline);

@@ -3,9 +3,9 @@
 struct BodyInfo {
     vec2  pos;
     float angle;
-    uint  edge_offset; 
-    uint  edge_count;  
-    uint  sdf_offset; 
+    uint  edge_offset;
+    uint  edge_count;
+    uint  sdf_offset;
     uint  sdf_w;
     uint  sdf_h;
     vec2  com_local;
@@ -33,8 +33,9 @@ layout(std430, set = 0, binding = 4)           buffer ContactBuffer { Contact  c
 layout(std430, set = 0, binding = 5)           buffer CounterBuffer { uint     contact_count; };
 
 layout(push_constant) uniform PC {
-    uint pair_count;
-    uint max_contacts;
+    uint  pair_count;
+    uint  max_contacts;
+    float sdf_scale;
 };
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -57,93 +58,107 @@ float sample_sdf(uint offset, uint w, uint h, vec2 p) {
          + sample_sdf_pix(offset, w, h, x1, y1) * fx*fy;
 }
 
-vec2 sdf_gradient(uint offset, uint w, uint h, vec2 p) {
-    float dx = sample_sdf(offset, w, h, p + vec2(1,0)) - sample_sdf(offset, w, h, p - vec2(1,0));
-    float dy = sample_sdf(offset, w, h, p + vec2(0,1)) - sample_sdf(offset, w, h, p - vec2(0,1));
-    return vec2(dx, dy) * 0.5;
-}
-
 vec2 world_to_img(vec2 wp, BodyInfo ref) {
     float c = cos(-ref.angle), s = sin(-ref.angle);
     vec2  d = wp - ref.pos;
     vec2  local = vec2(c*d.x - s*d.y, s*d.x + c*d.y);
-    return local + ref.com_local + vec2(float(ref.sdf_w)*0.5, float(ref.sdf_h)*0.5);
+    return local * sdf_scale + ref.com_local * sdf_scale + vec2(float(ref.sdf_w)*0.5, float(ref.sdf_h)*0.5);
 }
 
-vec2 img_to_world(vec2 ip, BodyInfo ref) {
-    vec2  local = ip - ref.com_local - vec2(float(ref.sdf_w)*0.5, float(ref.sdf_h)*0.5);
-    float c = cos(ref.angle), s = sin(ref.angle);
-    return ref.pos + vec2(c*local.x - s*local.y, s*local.x + c*local.y);
+vec2 rotate2D(vec2 v, float angle) {
+    float c = cos(angle), s = sin(angle);
+    return vec2(c*v.x - s*v.y, s*v.x + c*v.y);
 }
 
-void emit(BodyInfo ref, uint body_a, uint body_b,
-          vec2 contact_img, float depth, vec2 outside_img, float normal_sign) {
-    vec2  grad = sdf_gradient(ref.sdf_offset, ref.sdf_w, ref.sdf_h, contact_img);
-    float len  = length(grad);
-    if (len < 1e-6) return;
+#define MAX_CANDS 4
 
-    vec2 n_local = grad / len;
-    if (dot(n_local, outside_img - contact_img) < 0.0)
-        n_local = -n_local;
+// For each vertex of query that lies inside ref (SDF < 0), emit a contact.
+// Normal convention: points from body_a toward body_b.
+//   normal_sign = +1: ref=A, query=B → n = -outward_B  (points A→B)
+//   normal_sign = -1: ref=B, query=A → n = +outward_A  (points A→B)
+void test_edges_vs_sdf(BodyInfo ref, BodyInfo query, uint body_a, uint body_b, float normal_sign) {
+    uint n = query.edge_count;
+    if (n < 3u || ref.sdf_w == 0u) return;
 
-    float c = cos(ref.angle), s = sin(ref.angle);
-    vec2  n = vec2(c*n_local.x - s*n_local.y, s*n_local.x + c*n_local.y) * normal_sign;
-
-    uint idx = atomicAdd(contact_count, 1u);
-    if (idx < max_contacts) {
-        contacts[idx].world_pt = img_to_world(contact_img, ref);
-        contacts[idx].normal   = n;
-        contacts[idx].depth    = depth;
-        contacts[idx].body_a   = body_a;
-        contacts[idx].body_b   = body_b;
-        contacts[idx]._pad     = 0u;
+    // Compute signed area to determine winding order.
+    // Positive = CCW in standard y-up math (CW on screen, like static rects).
+    // Negative = CW in standard y-up math (CCW on screen, like marching-squares shapes).
+    // Outward normal formula: winding * (ey, -ex) handles both conventions.
+    float signed_area = 0.0;
+    for (uint vi = 0u; vi < n; vi++) {
+        vec2 a = verts[query.edge_offset + vi];
+        vec2 b = verts[query.edge_offset + (vi + 1u) % n];
+        signed_area += a.x * b.y - b.x * a.y;
     }
-}
+    float winding = signed_area > 0.0 ? 1.0 : -1.0;
 
-void test_edges(BodyInfo ref, BodyInfo other, uint body_a, uint body_b, float normal_sign) {
-    float co = cos(other.angle), so = sin(other.angle);
+    vec2  cand_pt   [MAX_CANDS];
+    vec2  cand_norm [MAX_CANDS];
+    float cand_depth[MAX_CANDS];
+    int   n_cands      = 0;
+    float min_cand_d   = 1e30;
+    int   min_cand_idx = 0;
 
-    for (uint vi = 0; vi < other.edge_count; vi++) {
-        vec2 lv0 = verts[other.edge_offset + vi];
-        vec2 lv1 = verts[other.edge_offset + (vi + 1u) % other.edge_count];
+    for (uint vi = 0u; vi < n; vi++) {
+        vec2 v_local = verts[query.edge_offset + vi];
+        vec2 v_world = query.pos + rotate2D(v_local, query.angle);
 
-        vec2 w0 = other.pos + vec2(co*lv0.x - so*lv0.y, so*lv0.x + co*lv0.y);
-        vec2 w1 = other.pos + vec2(co*lv1.x - so*lv1.y, so*lv1.x + co*lv1.y);
+        // Depth from ref SDF (image pixels, negative = inside)
+        vec2  r_img = world_to_img(v_world, ref);
+        float d_r   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, r_img);
+        if (d_r >= 0.0) continue;
 
-        vec2  img0 = world_to_img(w0, ref);
-        vec2  img1 = world_to_img(w1, ref);
-        float d0   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, img0);
-        float d1   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, img1);
+        float depth = -d_r / sdf_scale;  // positive penetration in world units
 
-        if (d0 >= 0.0 && d1 >= 0.0) continue;
+        // Adjacent vertices for edge normal computation.
+        vec2 v_prev = verts[query.edge_offset + (vi + n - 1u) % n];
+        vec2 v_next = verts[query.edge_offset + (vi + 1u)     % n];
 
-        float edge_len = length(img1 - img0);
-        int   steps    = clamp(int(ceil(edge_len)), 1, 512);
+        // Outward edge normals: winding * (ey, -ex) gives correct direction
+        // for both CW-on-screen (winding=+1) and CCW-on-screen (winding=-1) polygons.
+        vec2 e_prev = v_local - v_prev;
+        vec2 e_next = v_next  - v_local;
+        float lp = length(e_prev), ln = length(e_next);
+        vec2 n_prev = lp > 1e-6 ? winding * vec2(e_prev.y, -e_prev.x) / lp : vec2(0.0);
+        vec2 n_next = ln > 1e-6 ? winding * vec2(e_next.y, -e_next.x) / ln : vec2(0.0);
 
-        float prev_d   = d0;
-        vec2  prev_img = img0;
-        int   emitted  = 0;
+        vec2  n_sum = n_prev + n_next;
+        float nl    = length(n_sum);
+        if (nl < 1e-6) continue;
+        vec2 n_local = n_sum / nl;
 
-        for (int i = 1; i <= steps && emitted < 2; i++) {
-            float t       = float(i) / float(steps);
-            vec2  cur_img = mix(img0, img1, t);
-            float cur_d   = sample_sdf(ref.sdf_offset, ref.sdf_w, ref.sdf_h, cur_img);
+        // World-space contact normal (points from body_a toward body_b)
+        vec2 contact_n = -rotate2D(n_local, query.angle) * normal_sign;
 
-            if ((prev_d < 0.0) != (cur_d < 0.0)) {
-                float t_x       = prev_d / (prev_d - cur_d);
-                vec2  cross_img = prev_img + t_x * (cur_img - prev_img);
-                vec2  outside   = (prev_d >= 0.0) ? prev_img : cur_img;
-                emit(ref, body_a, body_b, cross_img, max(-prev_d, -cur_d), outside, normal_sign);
-                emitted++;
+        if (n_cands < MAX_CANDS) {
+            cand_pt   [n_cands] = v_world;
+            cand_norm [n_cands] = contact_n;
+            cand_depth[n_cands] = depth;
+            if (depth < min_cand_d) { min_cand_d = depth; min_cand_idx = n_cands; }
+            n_cands++;
+        } else if (depth > min_cand_d) {
+            cand_pt   [min_cand_idx] = v_world;
+            cand_norm [min_cand_idx] = contact_n;
+            cand_depth[min_cand_idx] = depth;
+            min_cand_d = cand_depth[0]; min_cand_idx = 0;
+            for (int i = 1; i < MAX_CANDS; i++) {
+                if (cand_depth[i] < min_cand_d) {
+                    min_cand_d   = cand_depth[i];
+                    min_cand_idx = i;
+                }
             }
-
-            prev_d   = cur_d;
-            prev_img = cur_img;
         }
+    }
 
-        if (emitted == 0 && d0 < 0.0 && d1 < 0.0) {
-            if (d0 > d1) emit(ref, body_a, body_b, img0, -d0, img0 + (img0 - img1), normal_sign);
-            else         emit(ref, body_a, body_b, img1, -d1, img1 + (img1 - img0), normal_sign);
+    for (int i = 0; i < n_cands; i++) {
+        uint idx = atomicAdd(contact_count, 1u);
+        if (idx < max_contacts) {
+            contacts[idx].world_pt = cand_pt[i];
+            contacts[idx].normal   = cand_norm[i];
+            contacts[idx].depth    = cand_depth[i];
+            contacts[idx].body_a   = body_a;
+            contacts[idx].body_b   = body_b;
+            contacts[idx]._pad     = 0u;
         }
     }
 }
@@ -158,11 +173,11 @@ void main() {
     BodyInfo a = bodies[idxA];
     BodyInfo b = bodies[idxB];
 
-    // Pass 1: B's edges vs A's SDF. A's gradient points outward from A (toward B). normal_sign=+1.
+    // Pass 1: B vertices vs A SDF → n = -outward_B → points A→B
     if (a.sdf_w > 0u && b.edge_count > 0u)
-        test_edges(a, b, idxA, idxB, +1.0);
+        test_edges_vs_sdf(a, b, idxA, idxB, +1.0);
 
-    // Pass 2: A's edges vs B's SDF. B's gradient points outward from B (toward A). Negate. normal_sign=-1.
+    // Pass 2: A vertices vs B SDF → n = +outward_A → points A→B
     if (b.sdf_w > 0u && a.edge_count > 0u)
-        test_edges(b, a, idxA, idxB, -1.0);
+        test_edges_vs_sdf(b, a, idxA, idxB, -1.0);
 }

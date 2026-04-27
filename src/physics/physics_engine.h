@@ -12,12 +12,12 @@ class ResiduaEngine;
 
 static constexpr uint32_t PHYSICS_WIDTH    = 480;
 static constexpr uint32_t PHYSICS_HEIGHT   = 270;
-static constexpr uint32_t MAX_GPU_CONTACTS = 4096;
-static constexpr uint32_t MAX_GPU_BODIES   = 1024;
+static constexpr uint32_t MAX_GPU_CONTACTS = 16384;
+static constexpr uint32_t MAX_GPU_BODIES   = 4096;
 static constexpr uint32_t MAX_GPU_VERTS    = 65536;
-static constexpr uint32_t MAX_GPU_PAIRS    = 8192;
-static constexpr uint32_t MAX_COLOR_BODIES = 1024;
-static constexpr uint32_t MAX_COLOR_ADJ    = 4096;
+static constexpr uint32_t MAX_GPU_PAIRS    = 16384;
+static constexpr uint32_t MAX_COLOR_BODIES = 4096;
+static constexpr uint32_t MAX_COLOR_ADJ    = 65536;
 static constexpr uint32_t COLOR_JP_ITERS   = 16;
 
 struct GPUBodyInfo {
@@ -130,6 +130,7 @@ public:
     uint32_t add_static_rect(ResiduaEngine* engine, glm::vec2 center, float w, float h);
 
     void remove_body(uint32_t idx);
+    void clear();
 
     std::optional<uint32_t> body_at(glm::vec2 world_pos) const;
 

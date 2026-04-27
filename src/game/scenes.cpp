@@ -17,9 +17,7 @@ void SceneManager::init(PhysicsEngine* phys, ResiduaEngine* eng,
 }
 
 void SceneManager::clear() {
-    auto& w = physics->world;
-    for (uint32_t i = 0; i < (uint32_t)w.bodies.size(); i++)
-        if (w.active[i]) physics->remove_body(i);
+    physics->clear();
     current_scene = -1;
 }
 
