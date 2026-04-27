@@ -8,7 +8,7 @@
 
 // ─── Solver constants ─────────────────────────────────────────────────────────
 
-static constexpr int   AVBD_MAX_ROWS    = 4;
+static constexpr int   AVBD_MAX_ROWS    = 8;
 static constexpr float AVBD_PENALTY_MIN = 1.f;
 static constexpr float AVBD_PENALTY_MAX = 1e9f;
 static constexpr float AVBD_ALPHA       = 0.99f;

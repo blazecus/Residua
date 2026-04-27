@@ -2,7 +2,7 @@
 
 #include "force.h"
 
-static constexpr int   MANIFOLD_MAX_CONTACTS   = 2;
+static constexpr int   MANIFOLD_MAX_CONTACTS   = 4;
 static constexpr float COLLISION_MARGIN        = 0.5f;
 static constexpr float STICK_THRESH            = 0.01f;
 
