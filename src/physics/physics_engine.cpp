@@ -667,19 +667,19 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         if (bdi.body_w == 0 || bdi.body_h == 0) continue;
 
         const RigidBody2& rb = world.bodies[i];
-        rb_ptr[i] = RigidBodyDrawGPU{
-            .position         = glm::vec2(rb.position),
-            .rotation         = rb.position.z,
-            .total_mass       = rb.mass,
-            .velocity         = glm::vec2(rb.velocity),
-            .angular_velocity = rb.velocity.z,
-            .I_com            = rb.inertia,
-            .pixel_index      = bdi.pixel_index,
-            .body_w           = bdi.body_w,
-            .body_h           = bdi.body_h,
-            .sdf_offset       = bdi.sdf_offset,
-            .com_local        = rb.com_local,
-        };
+        RigidBodyDrawGPU draw{};
+        draw.position         = glm::vec2(rb.position);
+        draw.rotation         = rb.position.z;
+        draw.total_mass       = rb.mass;
+        draw.velocity         = glm::vec2(rb.velocity);
+        draw.angular_velocity = rb.velocity.z;
+        draw.I_com            = rb.inertia;
+        draw.pixel_index      = bdi.pixel_index;
+        draw.body_w           = bdi.body_w;
+        draw.body_h           = bdi.body_h;
+        draw.sdf_offset       = bdi.sdf_offset;
+        draw.com_local        = rb.com_local;
+        rb_ptr[i] = draw;
         active_ptr[active_count++] = i;
     }
 

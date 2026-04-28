@@ -21,28 +21,28 @@ public:
 	};
 
 	struct Output {
-		bool boolOutput = false;
-		float floatOutput = 0.0f;
+		bool bool_output = false;
+		float float_output = 0.0f;
 	};
 
     struct KeyboardInputMap {
-		std::unordered_map<SDL_Keycode, InputType> keyBindings;
-		std::unordered_map<int, InputType> mouseBindings;
+		std::unordered_map<SDL_Keycode, InputType> key_bindings;
+		std::unordered_map<int, InputType> mouse_bindings;
     };
 
 	struct ControllerInputMap {
-		std::unordered_map<uint8_t, InputType> buttonBindings;
-		std::unordered_map<uint8_t, std::vector<InputType>> axisBindings;
-		std::unordered_map<InputType, int> axisOrientation; 	
+		std::unordered_map<uint8_t, InputType> button_bindings;
+		std::unordered_map<uint8_t, std::vector<InputType>> axis_bindings;
+		std::unordered_map<InputType, int> axis_orientation;
 	};
 
 	struct InputSettings {
-		glm::vec2 mouseSensitivity = glm::vec2(1.0f);
-		glm::vec2 joystickCameraSensitivity = glm::vec2(1.0f);
+		glm::vec2 mouse_sensitivity = glm::vec2(1.0f);
+		glm::vec2 joystick_camera_sensitivity = glm::vec2(1.0f);
 
-		KeyboardInputMap keyboardMap;
-		ControllerInputMap controllerMap;
-		bool keyboardToggle = true;
+		KeyboardInputMap keyboard_map;
+		ControllerInputMap controller_map;
+		bool keyboard_toggle = true;
 	};
 
     struct Inputs {
@@ -57,12 +57,12 @@ public:
 			{CROUCH,   Output{}},
 			{BACK,     Output{}}
 		};
-		
-        glm::vec2 cameraMovement = glm::vec2(0.0f);
-		
+
+        glm::vec2 camera_movement = glm::vec2(0.0f);
+
 		// access functions
-		float  flou(const InputType input) const { return bindings.at(input).floatOutput; }; // float out
-		bool   blou(const InputType input) const { return bindings.at(input).boolOutput; }; // bool out
+		float  flou(const InputType input) const { return bindings.at(input).float_output; }; // float out
+		bool   blou(const InputType input) const { return bindings.at(input).bool_output; }; // bool out
 		Output rawou(const InputType input) const { return bindings.at(input); }; // raw output representation
     };
 
@@ -82,7 +82,7 @@ public:
 	// default mappings
 
 	void defaultKeyboardMap() {
-		settings.keyboardMap.keyBindings = {
+		settings.keyboard_map.key_bindings = {
 			{SDLK_w, FORWARD},
 			{SDLK_s, BACKWARD},
 			{SDLK_a, LEFT},
@@ -91,14 +91,14 @@ public:
 			{SDLK_LSHIFT, CROUCH},
 			{SDLK_BACKSPACE, BACK}
 		};
-		settings.keyboardMap.mouseBindings = {
+		settings.keyboard_map.mouse_bindings = {
 			{SDL_BUTTON_LEFT, SELECT},
 			{SDL_BUTTON_RIGHT, INSPECT}
 		};
 	}
 
 	void defaultControllerMap() {
-		settings.controllerMap.axisOrientation = {
+		settings.controller_map.axis_orientation = {
 			{JUMP,   0},
 			{CROUCH, 0},
 			{BACK,   0},
@@ -109,13 +109,13 @@ public:
 			{LEFT,     -1},
 			{RIGHT,     1}
 		};
-		settings.controllerMap.buttonBindings = {
+		settings.controller_map.button_bindings = {
 			{SDL_CONTROLLER_BUTTON_A, JUMP},
 			{SDL_CONTROLLER_BUTTON_X, CROUCH},
 			{SDL_CONTROLLER_BUTTON_B, BACK},
 			{SDL_CONTROLLER_BUTTON_A, SELECT}
 		};
-		settings.controllerMap.axisBindings = {
+		settings.controller_map.axis_bindings = {
 			{SDL_CONTROLLER_AXIS_LEFTY, {FORWARD, BACKWARD}},
 			{SDL_CONTROLLER_AXIS_LEFTX, {LEFT, RIGHT}}
 		};
@@ -155,41 +155,41 @@ public:
 
 		// KEYBOARD / MOUSE CONTROLS
 		// enables by default if there is no controller connected
-		if (settings.keyboardToggle || !controller) {
+		if (settings.keyboard_toggle || !controller) {
 
 			// event handling - determine output before mapping to game input
 			Output output;
-			inputs.cameraMovement = glm::vec2(0.0f);
+			inputs.camera_movement = glm::vec2(0.0f);
 			if (e.type == SDL_KEYUP || e.type == SDL_MOUSEBUTTONUP) {
-				output.boolOutput = false;
-				output.floatOutput = 0.0f;
+				output.bool_output = false;
+				output.float_output = 0.0f;
 			}
 			else if (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) {
-				output.boolOutput = true;
-				output.floatOutput = 1.0f;
+				output.bool_output = true;
+				output.float_output = 1.0f;
 			}
 			else if (e.type == SDL_MOUSEMOTION) {
-				inputs.cameraMovement = glm::vec2(e.motion.xrel, e.motion.yrel);
+				inputs.camera_movement = glm::vec2(e.motion.xrel, e.motion.yrel);
 				return;
 			}
 			else {
 				return;
 			}
-	
+
 			// map event input to game input
 			InputType binding;
-			if (settings.keyboardMap.keyBindings.find(e.key.keysym.sym) != settings.keyboardMap.keyBindings.end()) {
-				binding = settings.keyboardMap.keyBindings[e.key.keysym.sym];
+			if (settings.keyboard_map.key_bindings.find(e.key.keysym.sym) != settings.keyboard_map.key_bindings.end()) {
+				binding = settings.keyboard_map.key_bindings[e.key.keysym.sym];
 			}
-			else if(settings.keyboardMap.mouseBindings.find(e.button.button) != settings.keyboardMap.mouseBindings.end()) {
-				binding = settings.keyboardMap.mouseBindings[e.button.button];
+			else if(settings.keyboard_map.mouse_bindings.find(e.button.button) != settings.keyboard_map.mouse_bindings.end()) {
+				binding = settings.keyboard_map.mouse_bindings[e.button.button];
 			}
 			else {
 				return;
 			}
 
 			// input binding
-			inputs.bindings[binding] = output;	
+			inputs.bindings[binding] = output;
 			return;
 		}
 
@@ -204,25 +204,25 @@ public:
 
 					// camera is always on right controller axis
 					if (e.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX) {
-						inputs.cameraMovement.x = e.caxis.value / 32768; // magic number: 32768 is max absolute value of an axis
+						inputs.camera_movement.x = e.caxis.value / 32768; // magic number: 32768 is max absolute value of an axis
 						return;
 					}
 					else if (e.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY) {
-						inputs.cameraMovement.y = e.caxis.value / 32768;
+						inputs.camera_movement.y = e.caxis.value / 32768;
 						return;
 					}
-					
-					// generalized mapped axis handling
-					if (settings.controllerMap.axisBindings.find(e.caxis.axis) == settings.controllerMap.axisBindings.end()) return;
 
-					std::vector<InputType> bindings = settings.controllerMap.axisBindings[e.caxis.axis];
+					// generalized mapped axis handling
+					if (settings.controller_map.axis_bindings.find(e.caxis.axis) == settings.controller_map.axis_bindings.end()) return;
+
+					std::vector<InputType> bindings = settings.controller_map.axis_bindings[e.caxis.axis];
 					float mag = e.caxis.value / 32768; //float normalization
 					for (InputType& input : bindings) {
-						int orientation = settings.controllerMap.axisOrientation[input];
+						int orientation = settings.controller_map.axis_orientation[input];
 						Output axis_output;
 						// axis supports float input, which are considered valid if the axis passes a dead zone
-						axis_output.boolOutput = mag * orientation > DEAD_ZONE;
-						axis_output.floatOutput = abs(mag) * axis_output.boolOutput;
+						axis_output.bool_output = mag * orientation > DEAD_ZONE;
+						axis_output.float_output = abs(mag) * axis_output.bool_output;
 
 						inputs.bindings[input] = axis_output;
 					}
@@ -232,22 +232,22 @@ public:
 				case SDL_CONTROLLERBUTTONDOWN:
 				{
 					// buttons work just like keys do
-					if (settings.controllerMap.buttonBindings.find(e.cbutton.button) == settings.controllerMap.buttonBindings.end()) return;
+					if (settings.controller_map.button_bindings.find(e.cbutton.button) == settings.controller_map.button_bindings.end()) return;
 
-					InputType binding = settings.controllerMap.buttonBindings[e.cbutton.button];
-					output.boolOutput = true;
-					output.floatOutput = 1.0f;
+					InputType binding = settings.controller_map.button_bindings[e.cbutton.button];
+					output.bool_output = true;
+					output.float_output = 1.0f;
 					inputs.bindings[binding] = output;
 					break;
 				}
 
 				case SDL_CONTROLLERBUTTONUP:
 				{
-					if (settings.controllerMap.buttonBindings.find(e.cbutton.button) == settings.controllerMap.buttonBindings.end()) return;
+					if (settings.controller_map.button_bindings.find(e.cbutton.button) == settings.controller_map.button_bindings.end()) return;
 
-					InputType binding = settings.controllerMap.buttonBindings[e.cbutton.button];
-					output.boolOutput = false;
-					output.floatOutput = 0.0f;
+					InputType binding = settings.controller_map.button_bindings[e.cbutton.button];
+					output.bool_output = false;
+					output.float_output = 0.0f;
 					inputs.bindings[binding] = output;
 					break;
 				}
@@ -264,10 +264,10 @@ public:
 
 	void resetMouse(SDL_Window* window) {
 		SDL_WarpMouseInWindow(window,0,0);
-		inputs.cameraMovement = glm::vec2(0.0f);
+		inputs.camera_movement = glm::vec2(0.0f);
 	}
 
 	void resetInput() {
-		inputs.cameraMovement = glm::vec2(0.0f);
+		inputs.camera_movement = glm::vec2(0.0f);
 	}
 };

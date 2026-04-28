@@ -73,7 +73,11 @@ void main() {
         vec4 color = pixel_colors[body.pixel_index + i];
         if (color.a <= 0.0) continue;
 
-        float sdf_val = sdf_data[body.sdf_offset + i];
+        const uint SDF_SCALE = 2;
+        uint sdf_w = body.body_w * SDF_SCALE;
+        uint sdf_x = lx * SDF_SCALE;
+        uint sdf_y = ly * SDF_SCALE;
+        float sdf_val = sdf_data[body.sdf_offset + sdf_y * sdf_w + sdf_x];
         float t = clamp(-sdf_val / 5.0, 0.0, 1.0);
         color.rgb = mix(vec3(1.0), vec3(0.1, 0.4, 1.0), t);
 
