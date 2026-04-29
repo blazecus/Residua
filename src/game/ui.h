@@ -1,8 +1,8 @@
 #pragma once
 
 struct SceneManager;
-struct PhysicsEngine;
-struct ResiduaEngine;
+class PhysicsEngine;
+class ResiduaEngine;
 
 struct UIManager {
     SceneManager*  scenes  { nullptr };

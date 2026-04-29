@@ -5,7 +5,7 @@
 #include "../physics/shape_gen.h"
 #include <string>
 
-struct RigidBody2 {
+struct RigidBody {
     LoadedBodyImage sprite;
     std::vector<glm::vec2> shape;      
     std::vector<float>     sdf;  

@@ -54,6 +54,8 @@ add_executable (Residua
   src/physics/force.h
   src/physics/joint.cpp
   src/physics/joint.h
+  src/physics/spring.cpp
+  src/physics/spring.h
   src/physics/physics_engine.cpp
   src/physics/physics_engine.h
 )

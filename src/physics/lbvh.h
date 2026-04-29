@@ -169,7 +169,7 @@ inline void lbvh_build(LBVH& lbvh, std::vector<AABB>& boxes) {
             }
         }
 
-        int node_index = lbvh.nodes.size();
+        int node_index = (int)lbvh.nodes.size();
         lbvh.nodes.push_back(LBVHNode{}); // empty placeholder
 
         auto[left_index, box_left] = build_recurse(first, split);

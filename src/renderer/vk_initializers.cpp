@@ -304,25 +304,6 @@ VkImageViewCreateInfo vkinit::imageview_create_info(VkFormat format, VkImage ima
     return info;
 }
 
-VkImageViewCreateInfo vkinit::imageview_create_cubemap_info(VkFormat format, VkImage image, VkImageAspectFlags aspectFlags)
-{
-    // build a image-view for the depth image to use for rendering
-    VkImageViewCreateInfo info = {};
-    info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    info.pNext = nullptr;
-
-    info.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-    info.image = image;
-    info.format = format;
-    info.subresourceRange.baseMipLevel = 0;
-    info.subresourceRange.levelCount = 1;
-    info.subresourceRange.baseArrayLayer = 0;
-    info.subresourceRange.layerCount = 6;
-    info.subresourceRange.aspectMask = aspectFlags;
-
-    return info;
-}
-
 //< image_set
 VkPipelineLayoutCreateInfo vkinit::pipeline_layout_create_info()
 {

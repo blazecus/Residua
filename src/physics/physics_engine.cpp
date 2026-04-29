@@ -333,7 +333,7 @@ void PhysicsEngine::init(ResiduaEngine* engine)
     });
 }
 
-uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
+uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
 {
     const uint32_t w = body.sprite.width;
     const uint32_t h = body.sprite.height;
@@ -375,7 +375,7 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody2 body)
 uint32_t PhysicsEngine::add_static_rect(ResiduaEngine* engine, glm::vec2 center, float w, float h)
 {
     uint32_t slot = world.add_static_rect(center, w, h);
-    const RigidBody2& body = world.bodies[slot];
+    const RigidBody& body = world.bodies[slot];
 
     grow_sdf_buffer(engine, next_sdf_float + body.sdf_w * body.sdf_h);
 
@@ -423,7 +423,7 @@ std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
 {
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
-        const RigidBody2&   rb  = world.bodies[i];
+        const RigidBody&   rb  = world.bodies[i];
         const BodyGPUInfo& bdi = body_draw_info[i];
 
         glm::vec2 delta = world_pos - glm::vec2(rb.position);
@@ -445,151 +445,153 @@ std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
 
 void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
 {
-    // 1. Broadphase — creates manifold stubs, clears precomputed_contacts.
     world.prepare();
+    run_coloring();
+    run_manifold_gen();
+    world.solve(dt);
+    uint32_t active_count = upload_draw_data();
+    if (active_count == 0) return;
+    run_draw(cmd, active_count);
+}
 
-    // 2. Jones-Plassmann body coloring — must run before solve so solver can use colors.
-    // TODO: move into its own function / file
-    {
-        const uint32_t body_count = (uint32_t)world.bodies.size();
-        if (body_count <= MAX_COLOR_BODIES && coloring_pl.pipeline != VK_NULL_HANDLE) {
-            // build adjacency grid
-            std::vector<std::vector<uint32_t>> adj(body_count);
-            for (const auto& f : world.forces) {
-                if (!f) continue;
-                uint32_t a = f->bodyA, b = f->bodyB;
-                if (a >= body_count || b >= body_count) continue;
-                if (world.bodies[a].inv_mass == 0.f || world.bodies[b].inv_mass == 0.f) continue;
-                adj[a].push_back(b);
-                adj[b].push_back(a);
-            }
-
-            auto* off_ptr = static_cast<uint32_t*>(col_adj_offsets_buf.info.pMappedData);
-            auto* lst_ptr = static_cast<uint32_t*>(col_adj_list_buf.info.pMappedData);
-            auto* pri_ptr = static_cast<uint32_t*>(col_priorities_buf.info.pMappedData);
-            auto* act_ptr = static_cast<uint32_t*>(col_active_buf.info.pMappedData);
-
-            uint32_t adj_total = 0;
-            for (uint32_t i = 0; i < body_count; i++) {
-                off_ptr[i] = adj_total;
-                if (adj_total + (uint32_t)adj[i].size() <= MAX_COLOR_ADJ) {
-                    for (uint32_t nb : adj[i]) lst_ptr[adj_total++] = nb;
-                } else {
-                    adj_total = MAX_COLOR_ADJ; // truncate
-                }
-            }
-            off_ptr[body_count] = adj_total;
-
-            for (uint32_t i = 0; i < body_count; i++) {
-                pri_ptr[i] = (uint32_t)rand();
-                act_ptr[i] = (world.active[i] && world.bodies[i].inv_mass > 0.f) ? 1u : 0u;
-            }
-
-            engine_ref->immediate_submit([&](VkCommandBuffer icmd) {
-                vkCmdFillBuffer(icmd, col_colors_buf.buffer, 0,
-                                body_count * sizeof(uint32_t), 0u);
-
-                VkBufferMemoryBarrier2 pre_barriers[5] = {
-                    {
-                        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                        .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                        .buffer = col_colors_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                    },
-                    {
-                        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                        .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                        .buffer = col_adj_offsets_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                    },
-                    {
-                        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                        .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                        .buffer = col_adj_list_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                    },
-                    {
-                        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                        .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                        .buffer = col_priorities_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                    },
-                    {
-                        .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                        .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                        .buffer = col_active_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                    },
-                };
-                VkDependencyInfo pre_dep {
-                    .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                    .bufferMemoryBarrierCount  = 5,
-                    .pBufferMemoryBarriers     = pre_barriers,
-                };
-                vkCmdPipelineBarrier2(icmd, &pre_dep);
-
-                vkCmdBindPipeline(icmd, VK_PIPELINE_BIND_POINT_COMPUTE, coloring_pl.pipeline);
-                vkCmdBindDescriptorSets(icmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    coloring_pl.layout, 0, 1, &coloring_desc, 0, nullptr);
-                vkCmdPushConstants(icmd, coloring_pl.layout,
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &body_count);
-
-                const uint32_t groups = (body_count + 63) / 64;
-                for (uint32_t iter = 0; iter < COLOR_JP_ITERS; iter++) {
-                    vkCmdDispatch(icmd, groups, 1, 1);
-                    if (iter + 1 < COLOR_JP_ITERS) {
-                        // Barrier: colors writes from this iter visible to reads in next iter.
-                        VkBufferMemoryBarrier2 iter_barrier {
-                            .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                            .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-                            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                            .buffer = col_colors_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
-                        };
-                        VkDependencyInfo iter_dep {
-                            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                            .bufferMemoryBarrierCount = 1,
-                            .pBufferMemoryBarriers    = &iter_barrier,
-                        };
-                        vkCmdPipelineBarrier2(icmd, &iter_dep);
-                    }
-                }
-            });
-
-            // Read back colors into world for the solver to use.
-            auto* col_ptr = static_cast<const uint32_t*>(col_colors_buf.info.pMappedData);
-            world.colors.assign(col_ptr, col_ptr + body_count);
-            world.max_color = 0;
-            for (uint32_t i = 0; i < body_count; i++)
-                if (world.colors[i] != 0xFFFFFFFFu && world.colors[i] > world.max_color)
-                    world.max_color = world.colors[i];
-        } else {
-            // Too many body slots for GPU coloring — clear so solver falls back to
-            // single sequential group (correct but unparallelized).
-            printf("too many bodies");
-            world.colors.clear();
-        }
+void PhysicsEngine::run_coloring()
+{
+    const uint32_t body_count = (uint32_t)world.bodies.size();
+    if (body_count > MAX_COLOR_BODIES || coloring_pl.pipeline == VK_NULL_HANDLE) {
+        printf("too many bodies");
+        world.colors.clear();
+        return;
     }
 
-    // 3. Upload body info (current poses) and build pair list from manifolds.
+    std::vector<std::vector<uint32_t>> adj(body_count);
+    for (const auto& f : world.forces) {
+        if (!f) continue;
+        uint32_t a = f->bodyA, b = f->bodyB;
+        if (a >= body_count || b >= body_count) continue;
+        if (world.bodies[a].inv_mass == 0.f || world.bodies[b].inv_mass == 0.f) continue;
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    }
+
+    auto* off_ptr = static_cast<uint32_t*>(col_adj_offsets_buf.info.pMappedData);
+    auto* lst_ptr = static_cast<uint32_t*>(col_adj_list_buf.info.pMappedData);
+    auto* pri_ptr = static_cast<uint32_t*>(col_priorities_buf.info.pMappedData);
+    auto* act_ptr = static_cast<uint32_t*>(col_active_buf.info.pMappedData);
+
+    uint32_t adj_total = 0;
+    for (uint32_t i = 0; i < body_count; i++) {
+        off_ptr[i] = adj_total;
+        if (adj_total + (uint32_t)adj[i].size() <= MAX_COLOR_ADJ) {
+            for (uint32_t nb : adj[i]) lst_ptr[adj_total++] = nb;
+        } else {
+            adj_total = MAX_COLOR_ADJ;
+        }
+    }
+    off_ptr[body_count] = adj_total;
+
+    for (uint32_t i = 0; i < body_count; i++) {
+        pri_ptr[i] = (uint32_t)rand();
+        act_ptr[i] = (world.active[i] && world.bodies[i].inv_mass > 0.f) ? 1u : 0u;
+    }
+
+    engine_ref->immediate_submit([&](VkCommandBuffer icmd) {
+        vkCmdFillBuffer(icmd, col_colors_buf.buffer, 0,
+                        body_count * sizeof(uint32_t), 0u);
+
+        VkBufferMemoryBarrier2 pre_barriers[5] = {
+            {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .buffer = col_colors_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .buffer = col_adj_offsets_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .buffer = col_adj_list_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .buffer = col_priorities_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .buffer = col_active_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+            },
+        };
+        VkDependencyInfo pre_dep {
+            .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .bufferMemoryBarrierCount  = 5,
+            .pBufferMemoryBarriers     = pre_barriers,
+        };
+        vkCmdPipelineBarrier2(icmd, &pre_dep);
+
+        vkCmdBindPipeline(icmd, VK_PIPELINE_BIND_POINT_COMPUTE, coloring_pl.pipeline);
+        vkCmdBindDescriptorSets(icmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            coloring_pl.layout, 0, 1, &coloring_desc, 0, nullptr);
+        vkCmdPushConstants(icmd, coloring_pl.layout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &body_count);
+
+        const uint32_t groups = (body_count + 63) / 64;
+        for (uint32_t iter = 0; iter < COLOR_JP_ITERS; iter++) {
+            vkCmdDispatch(icmd, groups, 1, 1);
+            if (iter + 1 < COLOR_JP_ITERS) {
+                VkBufferMemoryBarrier2 iter_barrier {
+                    .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                    .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                    .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                    .buffer = col_colors_buf.buffer, .offset = 0, .size = VK_WHOLE_SIZE,
+                };
+                VkDependencyInfo iter_dep {
+                    .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                    .bufferMemoryBarrierCount = 1,
+                    .pBufferMemoryBarriers    = &iter_barrier,
+                };
+                vkCmdPipelineBarrier2(icmd, &iter_dep);
+            }
+        }
+    });
+
+    auto* col_ptr = static_cast<const uint32_t*>(col_colors_buf.info.pMappedData);
+    world.colors.assign(col_ptr, col_ptr + body_count);
+    world.max_color = 0;
+    for (uint32_t i = 0; i < body_count; i++)
+        if (world.colors[i] != 0xFFFFFFFFu && world.colors[i] > world.max_color)
+            world.max_color = world.colors[i];
+}
+
+void PhysicsEngine::run_manifold_gen()
+{
     auto* body_info_ptr = static_cast<GPUBodyInfo*>(body_info_buf.info.pMappedData);
     auto* pair_ptr      = static_cast<GPUPair*>(pair_buf.info.pMappedData);
     uint32_t pair_count = 0;
 
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (i >= MAX_GPU_BODIES) break;
-        const RigidBody2& rb = world.bodies[i];
+        const RigidBody& rb = world.bodies[i];
         const BodyGPUInfo& info = (i < body_draw_info.size()) ? body_draw_info[i] : BodyGPUInfo{};
         body_info_ptr[i] = {
             glm::vec2(rb.position),
@@ -609,7 +611,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         pair_ptr[pair_count++] = { m->bodyA, m->bodyB };
     }
 
-    // GPU manifold-gen pass (synchronous via immediate_submit).
     if (pair_count > 0) {
         *static_cast<uint32_t*>(counter_buf.info.pMappedData) = 0u;
 
@@ -625,14 +626,12 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
             vkCmdDispatch(icmd, (pair_count + 63) / 64, 1, 1);
         });
 
-        // 4. Read back contacts and distribute to precomputed_contacts.
         uint32_t num_contacts = std::min(
             *static_cast<uint32_t*>(counter_buf.info.pMappedData),
             MAX_GPU_CONTACTS);
 
         auto* contacts = static_cast<GPUContact*>(contact_buf.info.pMappedData);
 
-        // Group raw GPU contacts by pair.
         std::unordered_map<uint64_t, std::vector<ManifoldPoint>> raw;
         for (uint32_t ci = 0; ci < num_contacts; ci++) {
             const GPUContact& gc = contacts[ci];
@@ -651,11 +650,10 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     world.stats.gpu_pairs      = pair_count;
     world.stats.gpu_verts      = next_vert;
     world.stats.gpu_sdf_floats = next_sdf_float;
+}
 
-    // 5. Solve (warm-start + AVBD iterations).
-    world.solve(dt);
-
-    // 2. Upload draw data for all active bodies.
+uint32_t PhysicsEngine::upload_draw_data()
+{
     auto* rb_ptr     = static_cast<RigidBodyDrawGPU*>(rb_draw_buf.info.pMappedData);
     auto* active_ptr = static_cast<uint32_t*>(active_indices_buf.info.pMappedData);
     uint32_t active_count = 0;
@@ -666,7 +664,7 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         const BodyGPUInfo& bdi = body_draw_info[i];
         if (bdi.body_w == 0 || bdi.body_h == 0) continue;
 
-        const RigidBody2& rb = world.bodies[i];
+        const RigidBody& rb = world.bodies[i];
         RigidBodyDrawGPU draw{};
         draw.position         = glm::vec2(rb.position);
         draw.rotation         = rb.position.z;
@@ -683,19 +681,21 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         active_ptr[active_count++] = i;
     }
 
-    if (active_count == 0) return;
+    return active_count;
+}
 
-    // 3. Clear output_screen.
-    VkClearColorValue clear_color{};
+void PhysicsEngine::run_draw(VkCommandBuffer cmd, uint32_t active_count)
+{
     VkImageSubresourceRange full_range {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .levelCount = 1,
         .layerCount = 1,
     };
+
+    VkClearColorValue clear_color{};
     vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL,
                          &clear_color, 1, &full_range);
 
-    // 4. Barrier: clear → draw compute.
     VkImageMemoryBarrier2 img_clear_barrier {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask     = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -714,7 +714,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     };
     vkCmdPipelineBarrier2(cmd, &dep1);
 
-    // 5. Draw pass — one workgroup per active body.
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, draw_pl.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         draw_pl.layout, 0, 1, &draw_desc, 0, nullptr);
@@ -722,7 +721,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &active_count);
     vkCmdDispatch(cmd, active_count, 1, 1);
 
-    // 6. Barrier: draw → gap_fill.
     VkImageMemoryBarrier2 img_draw_barrier {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -741,7 +739,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     };
     vkCmdPipelineBarrier2(cmd, &dep2);
 
-    // 7. Gap-fill pass.
     struct { uint32_t width; uint32_t height; } gap_pc { PHYSICS_WIDTH, PHYSICS_HEIGHT };
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gap_fill_pl.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -749,7 +746,6 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     vkCmdPushConstants(cmd, gap_fill_pl.layout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gap_pc), &gap_pc);
     vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
-
 }
 
 PhysicsStats PhysicsEngine::get_stats(){

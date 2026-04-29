@@ -26,11 +26,11 @@ void Game::init() {
     cshape     = load_body_image("../assets/physics/cshape.png");
     star       = load_body_image("../assets/physics/star.png");
 
-    cpu_physics.init(&engine);
-    engine.cpu_physics = &cpu_physics;
+    physics_engine.init(&engine);
+    engine.physics_engine = &physics_engine;
 
-    scene_manager.init(&cpu_physics, &engine, &ball_image, &cshape, &star);
-    ui_manager.init(&scene_manager, &cpu_physics, &engine);
+    scene_manager.init(&physics_engine, &engine, &ball_image, &cshape, &star);
+    ui_manager.init(&scene_manager, &physics_engine, &engine);
     engine.ui_callback = [this]() { ui_manager.draw(); };
 
     scene_manager.load(0);
@@ -70,22 +70,22 @@ void Game::run() {
                     e.button.x * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
                     e.button.y * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
                 };
-                if (auto hit = cpu_physics.body_at(mpos)) {
-                    auto& body = cpu_physics.world.bodies[*hit];
+                if (auto hit = physics_engine.body_at(mpos)) {
+                    auto& body = physics_engine.world.bodies[*hit];
                     if (body.inv_mass > 0.f) {
                         drag_body  = *hit;
                         glm::vec2 r_local = glm::rotate(mpos - glm::vec2(body.position),
                                                         -body.position.z);
-                        auto* f = new MouseDrag(&cpu_physics.world, drag_body,
+                        auto* f = new MouseDrag(&physics_engine.world, drag_body,
                                                 r_local, mpos, 20000.f);
                         drag_force = f;
-                        cpu_physics.world.add_force(std::unique_ptr<Force>(f));
+                        physics_engine.world.add_force(std::unique_ptr<Force>(f));
                     }
                 }
             }
 
             if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT && drag_force) {
-                cpu_physics.world.remove_force(drag_force);
+                physics_engine.world.remove_force(drag_force);
                 drag_force = nullptr;
                 drag_body  = ~0u;
             }
@@ -96,11 +96,11 @@ void Game::run() {
 
         // Keep drag target in sync with mouse; cancel if body was removed.
         if (drag_force) {
-            if (drag_body < cpu_physics.world.bodies.size()
-                    && cpu_physics.world.active[drag_body]) {
+            if (drag_body < physics_engine.world.bodies.size()
+                    && physics_engine.world.active[drag_body]) {
                 drag_force->target = physics_mouse();
             } else {
-                cpu_physics.world.remove_force(drag_force);
+                physics_engine.world.remove_force(drag_force);
                 drag_force = nullptr;
                 drag_body  = ~0u;
             }
@@ -128,9 +128,9 @@ void Game::run() {
         }
 
         if (input.blou(InputManager::InputType::INSPECT)) {
-            if (auto hit = cpu_physics.body_at(physics_mouse())) {
-                if (cpu_physics.world.bodies[*hit].inv_mass > 0.f) // rbs only
-                    cpu_physics.remove_body(*hit);
+            if (auto hit = physics_engine.body_at(physics_mouse())) {
+                if (physics_engine.world.bodies[*hit].inv_mass > 0.f) // rbs only
+                    physics_engine.remove_body(*hit);
             }
         }
 

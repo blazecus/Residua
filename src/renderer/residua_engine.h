@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <deque>
 #include <functional>
@@ -43,7 +43,7 @@ struct DeletionQueue {
 
 
 struct FrameData {
-    VkSemaphore _swapchainSemaphore, _renderSemaphore;
+    VkSemaphore _swapchainSemaphore;
     VkFence _renderFence;
 
     DescriptorAllocatorGrowable _frameDescriptors;
@@ -60,17 +60,6 @@ struct EngineStats {
     int triangle_count;
     int drawcall_count;
     float mesh_draw_time;
-};
-
-struct TextureID {
-    uint32_t Index;
-};
-
-struct TextureCache {
-
-    std::vector<VkDescriptorImageInfo> Cache;
-    std::unordered_map<std::string, TextureID> NameMap;
-    TextureID AddTexture(const VkImageView& image, VkSampler sampler);
 };
 
 class ResiduaEngine {
@@ -96,12 +85,10 @@ public:
     VkFormat _swapchainImageFormat;
     VkExtent2D _swapchainExtent;
     VkExtent2D _drawExtent;
-    VkDescriptorPool _descriptorPool;
 
-    DescriptorAllocator globalDescriptorAllocator;
-
-std::vector<VkImage> _swapchainImages;
+    std::vector<VkImage>     _swapchainImages;
     std::vector<VkImageView> _swapchainImageViews;
+    std::vector<VkSemaphore> _renderSemaphores;
 
     DeletionQueue _mainDeletionQueue;
 
@@ -114,16 +101,6 @@ std::vector<VkImage> _swapchainImages;
     VkFence _immFence;
     VkCommandBuffer _immCommandBuffer;
     VkCommandPool _immCommandPool;
-
-    AllocatedImage _whiteImage;
-    AllocatedImage _blackImage;
-    AllocatedImage _greyImage;
-    AllocatedImage _errorCheckerboardImage;
-
-    VkSampler _defaultSamplerLinear;
-    VkSampler _defaultSamplerNearest;
-
-TextureCache texCache;
 
     EngineStats stats;
 
@@ -159,19 +136,16 @@ TextureCache texCache;
 
     bool resize_requested { false };
 
-    PhysicsEngine*   cpu_physics { nullptr };
+    PhysicsEngine*   physics_engine { nullptr };
     float _dt { 0.007f };
     std::function<void()> ui_callback;
     bool freeze_rendering { false };
-
-    void set_window(SDL_Window* window, VkExtent2D& extent);
 
     void process_renderer_input(SDL_Event& e);
 
     void process_player_update(glm::vec2 position);
 
     void draw_frame();
-    //void add_render_object()
 
 private:
     void init_vulkan();
@@ -191,10 +165,4 @@ private:
     void init_sync_structures();
 
     void init_imgui();
-
-    void init_default_data();
-
-    void init_pipelines();
-
-    void init_background_pipelines();
 };

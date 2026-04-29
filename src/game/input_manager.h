@@ -204,11 +204,11 @@ public:
 
 					// camera is always on right controller axis
 					if (e.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX) {
-						inputs.camera_movement.x = e.caxis.value / 32768; // magic number: 32768 is max absolute value of an axis
+						inputs.camera_movement.x = (float)e.caxis.value / 32768.0f;
 						return;
 					}
 					else if (e.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY) {
-						inputs.camera_movement.y = e.caxis.value / 32768;
+						inputs.camera_movement.y = (float)e.caxis.value / 32768.0f;
 						return;
 					}
 
@@ -216,7 +216,7 @@ public:
 					if (settings.controller_map.axis_bindings.find(e.caxis.axis) == settings.controller_map.axis_bindings.end()) return;
 
 					std::vector<InputType> bindings = settings.controller_map.axis_bindings[e.caxis.axis];
-					float mag = e.caxis.value / 32768; //float normalization
+					float mag = (float)e.caxis.value / 32768.0f;
 					for (InputType& input : bindings) {
 						int orientation = settings.controller_map.axis_orientation[input];
 						Output axis_output;

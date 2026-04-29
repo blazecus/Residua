@@ -15,8 +15,8 @@ Manifold::Manifold(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
 }
 
 bool Manifold::initialize() {
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
+    const RigidBody& ba = world->bodies[bodyA];
+    const RigidBody& bb = world->bodies[bodyB];
 
     friction = std::sqrt(ba.friction * bb.friction);
 
@@ -131,8 +131,8 @@ bool Manifold::initialize() {
 }
 
 void Manifold::computeConstraint(float alpha) {
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
+    const RigidBody& ba = world->bodies[bodyA];
+    const RigidBody& bb = world->bodies[bodyB];
 
     for (int i = 0; i < numContacts; i++) {
         glm::vec3 dpA = ba.position - ba.initial;

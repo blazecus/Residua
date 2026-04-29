@@ -37,8 +37,8 @@ DistanceJoint::DistanceJoint(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB
 bool DistanceJoint::initialize() {
     if (!world->active[bodyA] || !world->active[bodyB]) return false;
 
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
+    const RigidBody& ba = world->bodies[bodyA];
+    const RigidBody& bb = world->bodies[bodyB];
 
     glm::vec2 pA = glm::vec2(ba.position) + glm::rotate(rA_local, ba.position.z);
     glm::vec2 pB = glm::vec2(bb.position) + glm::rotate(rB_local, bb.position.z);
@@ -51,8 +51,8 @@ bool DistanceJoint::initialize() {
 }
 
 void DistanceJoint::computeConstraint(float alpha) {
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
+    const RigidBody& ba = world->bodies[bodyA];
+    const RigidBody& bb = world->bodies[bodyB];
 
     glm::vec2 rAw = glm::rotate(rA_local, ba.position.z);
     glm::vec2 rBw = glm::rotate(rB_local, bb.position.z);
@@ -107,7 +107,7 @@ bool MouseDrag::initialize() {
 }
 
 void MouseDrag::computeConstraint(float /*alpha*/) {
-    const RigidBody2& ba = world->bodies[bodyA];
+    const RigidBody& ba = world->bodies[bodyA];
     glm::vec2 rAw = glm::rotate(r_local, ba.position.z);
     glm::vec2 pA  = glm::vec2(ba.position) + rAw;
     C[0] = pA.x - target.x;
@@ -121,58 +121,4 @@ void MouseDrag::computeDerivatives(uint32_t bi) {
     J[1] = {  0.f, 1.f,  rAw.x };
     H[0] = {}; H[0].row[2].z = -rAw.x;
     H[1] = {}; H[1].row[2].z = -rAw.y;
-}
-
-// ─── Spring ───────────────────────────────────────────────────────────────────
-
-Spring::Spring(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB,
-               glm::vec2 rA_local, glm::vec2 rB_local,
-               float rest_length, float stiffness)
-    : Force(world, bodyA, bodyB), rA_local(rA_local), rB_local(rB_local),
-      rest_length(rest_length)
-{
-    this->stiffness[0] = stiffness;
-    this->penalty[0]   = stiffness; // start at full stiffness, no soft warm-up
-}
-
-bool Spring::initialize() {
-    return world->active[bodyA] && world->active[bodyB];
-}
-
-void Spring::computeConstraint(float /*alpha*/) {
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
-
-    glm::vec2 rAw = glm::rotate(rA_local, ba.position.z);
-    glm::vec2 rBw = glm::rotate(rB_local, bb.position.z);
-
-    glm::vec2 diff = glm::vec2(ba.position) + rAw - glm::vec2(bb.position) - rBw;
-    float len = glm::length(diff);
-
-    C[0] = (len < 1e-6f) ? -rest_length : len - rest_length;
-}
-
-void Spring::computeDerivatives(uint32_t bi) {
-    const RigidBody2& ba = world->bodies[bodyA];
-    const RigidBody2& bb = world->bodies[bodyB];
-
-    glm::vec2 rAw  = glm::rotate(rA_local, ba.position.z);
-    glm::vec2 rBw  = glm::rotate(rB_local, bb.position.z);
-    glm::vec2 diff = glm::vec2(ba.position) + rAw - glm::vec2(bb.position) - rBw;
-    float len = glm::length(diff);
-
-    H[0] = {};
-
-    if (len < 1e-6f) {
-        J[0] = {};
-        return;
-    }
-
-    glm::vec2 d = diff / len;
-
-    if (bi == bodyA) {
-        J[0] = { d.x, d.y, rAw.x * d.y - rAw.y * d.x };
-    } else {
-        J[0] = { -d.x, -d.y, -(rBw.x * d.y - rBw.y * d.x) };
-    }
 }

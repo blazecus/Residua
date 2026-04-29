@@ -4,7 +4,7 @@
 #include <src/physics/body_image.h>
 #include <string>
 
-struct ResiduaEngine;
+class ResiduaEngine;
 
 struct SceneEntry {
     const char* name;

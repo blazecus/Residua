@@ -10,7 +10,7 @@
 #include <mutex>
 #include <unordered_set>
 
-static AABB compute_world_aabb(const RigidBody2& rb) {
+static AABB compute_world_aabb(const RigidBody& rb) {
     glm::vec2 mn( 1e20f,  1e20f);
     glm::vec2 mx(-1e20f, -1e20f);
     for (const glm::vec2& v : rb.shape) {
@@ -36,7 +36,7 @@ Force::Force(PhysicsWorld* world, uint32_t bodyA, uint32_t bodyB)
     }
 }
 
-uint32_t PhysicsWorld::add_body(RigidBody2& rb) {
+uint32_t PhysicsWorld::add_body(RigidBody& rb) {
     if (!open_slots.empty()) {
         uint32_t slot = open_slots.back();
         open_slots.pop_back();
@@ -88,7 +88,7 @@ void PhysicsWorld::remove_force(Force* f) {
 }
 
 uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
-    RigidBody2 rb;
+    RigidBody rb;
     rb.position    = glm::vec3(center, 0.f);
     rb.inv_mass    = 0.f;
     rb.inv_inertia = 0.f;
@@ -118,13 +118,11 @@ uint32_t PhysicsWorld::add_static_rect(glm::vec2 center, float w, float h) {
     return add_body(rb);
 }
 
-RigidBody2& PhysicsWorld::get_body(uint32_t index) {
+RigidBody& PhysicsWorld::get_body(uint32_t index) {
     return bodies[index];
 }
 
 void PhysicsWorld::prepare() {
-    auto start = std::chrono::system_clock::now();
-
     precomputed_contacts.clear();
 
     stats.num_bodies = 0;
@@ -133,17 +131,27 @@ void PhysicsWorld::prepare() {
 
     std::vector<AABB>     boxes;
     std::vector<uint32_t> index_map;
+
+    auto t0 = std::chrono::system_clock::now();
+    build_lbvh(boxes, index_map);
+    auto t1 = std::chrono::system_clock::now();
+    broadphase(boxes, index_map);
+    auto t2 = std::chrono::system_clock::now();
+
+    stats.lbvh_ms       = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.f;
+    stats.broadphase_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
+}
+
+void PhysicsWorld::build_lbvh(std::vector<AABB>& boxes, std::vector<uint32_t>& index_map) {
     for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
         if (!active[i] || bodies[i].shape.empty()) continue;
         boxes.push_back(compute_world_aabb(bodies[i]));
         index_map.push_back(i);
     }
     lbvh_build(lbvh, boxes);
+}
 
-    auto t1 = std::chrono::system_clock::now();
-    stats.lbvh_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
-
-    // Prune contact manifolds whose body AABBs no longer overlap.
+void PhysicsWorld::broadphase(const std::vector<AABB>& boxes, const std::vector<uint32_t>& index_map) {
     forces.erase(std::remove_if(forces.begin(), forces.end(),
         [&](const std::unique_ptr<Force>& f) -> bool {
             if (!f->is_contact()) return false;
@@ -155,7 +163,6 @@ void PhysicsWorld::prepare() {
         }),
         forces.end());
 
-    // Build O(1) lookup for already-existing contact manifold pairs.
     std::unordered_set<uint64_t> existing;
     existing.reserve(forces.size() * 2);
     for (const auto& f : forces) {
@@ -165,8 +172,6 @@ void PhysicsWorld::prepare() {
         existing.insert(((uint64_t)a << 32) | b);
     }
 
-    // Parallel AABB queries — each thread owns its local candidates vector.
-    // The lj > li guard ensures pair (i,j) is emitted by exactly one thread
     std::vector<std::pair<uint32_t,uint32_t>> new_pairs;
     std::mutex new_pairs_mtx;
 
@@ -183,8 +188,8 @@ void PhysicsWorld::prepare() {
                 if (lj <= (int)li) continue;
                 uint32_t i = index_map[li];
                 uint32_t j = index_map[lj];
-                const RigidBody2& bi = bodies[i];
-                const RigidBody2& bj = bodies[j];
+                const RigidBody& bi = bodies[i];
+                const RigidBody& bj = bodies[j];
                 if (!(bi.collision_layer & bj.collision_mask)) continue;
                 if (!(bj.collision_layer & bi.collision_mask)) continue;
                 {
@@ -207,16 +212,25 @@ void PhysicsWorld::prepare() {
         forces.push_back(std::make_unique<Manifold>(this, i, j));
 
     stats.num_forces = (uint32_t)forces.size();
-
-    auto t2 = std::chrono::system_clock::now();
-    stats.broadphase_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
 }
 
 void PhysicsWorld::solve(float dt) {
     last_dt = dt;
-    auto start = std::chrono::system_clock::now();
 
-    // Warm-start forces (initializes contacts, Jacobians, dual variables).
+    auto t0 = std::chrono::system_clock::now();
+    warm_start(dt);
+    auto t1 = std::chrono::system_clock::now();
+    predict(dt);
+    auto t2 = std::chrono::system_clock::now();
+    iterate(dt);
+    auto t3 = std::chrono::system_clock::now();
+
+    stats.warmstart_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.f;
+    stats.predict_ms   = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
+    stats.solver_ms    = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count() / 1000.f;
+}
+
+void PhysicsWorld::warm_start(float dt) {
     std::for_each(std::execution::par, forces.begin(), forces.end(),
         [&](std::unique_ptr<Force>& f) {
             if (!f->initialize()) { f.reset(); return; }
@@ -232,22 +246,12 @@ void PhysicsWorld::solve(float dt) {
         });
     forces.erase(std::remove_if(forces.begin(), forces.end(),
         [](const std::unique_ptr<Force>& f) { return !f; }), forces.end());
+}
 
-    // Build per-body adjacency list so the solver doesn't scan all forces per body.
-    std::vector<std::vector<Force*>> body_forces(bodies.size());
-    for (auto& f : forces) {
-        body_forces[f->bodyA].push_back(f.get());
-        if (f->bodyB < bodies.size())
-            body_forces[f->bodyB].push_back(f.get());
-    }
-
-    auto t1 = std::chrono::system_clock::now();
-    stats.warmstart_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start).count() / 1000.f;
-
-    // Predict positions (primal warm-start).
+void PhysicsWorld::predict(float dt) {
     for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
         if (!active[i]) continue;
-        RigidBody2& rb = bodies[i];
+        RigidBody& rb = bodies[i];
 
         rb.velocity.z = std::clamp(rb.velocity.z, -50.f, 50.f);
         if (rb.inv_mass > 0.f)
@@ -257,8 +261,8 @@ void PhysicsWorld::solve(float dt) {
         if (rb.inv_mass > 0.f)
             rb.inertial += glm::vec3(0.f, gravity, 0.f) * (dt * dt);
 
-        glm::vec3 accel      = (rb.velocity - rb.prev_velocity) / dt;
-        float     accelExt   = accel.y * (gravity < 0.f ? -1.f : 1.f);
+        glm::vec3 accel       = (rb.velocity - rb.prev_velocity) / dt;
+        float     accelExt    = accel.y * (gravity < 0.f ? -1.f : 1.f);
         float     accelWeight = std::clamp(accelExt / std::abs(gravity), 0.f, 1.f);
         if (!std::isfinite(accelWeight)) accelWeight = 0.f;
 
@@ -267,11 +271,16 @@ void PhysicsWorld::solve(float dt) {
         if (rb.inv_mass > 0.f)
             rb.position += glm::vec3(0.f, gravity, 0.f) * (accelWeight * dt * dt);
     }
+}
 
-    auto t2 = std::chrono::system_clock::now();
-    stats.predict_ms = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
+void PhysicsWorld::iterate(float dt) {
+    std::vector<std::vector<Force*>> body_forces(bodies.size());
+    for (auto& f : forces) {
+        body_forces[f->bodyA].push_back(f.get());
+        if (f->bodyB < bodies.size())
+            body_forces[f->bodyB].push_back(f.get());
+    }
 
-    // Pre-group dynamic bodies by color. Falls back to a single group
     uint32_t numColors = colors.empty() ? 1u : (max_color + 1u);
     std::vector<std::vector<uint32_t>> color_groups(numColors);
     for (uint32_t bi = 0; bi < (uint32_t)bodies.size(); bi++) {
@@ -282,8 +291,6 @@ void PhysicsWorld::solve(float dt) {
     }
 
     std::vector<glm::vec3> x_new(bodies.size());
-
-    // Main solver loop.
     int totalIterations = iterations + (postStabilize ? 1 : 0);
 
     for (int it = 0; it < totalIterations; it++) {
@@ -291,13 +298,11 @@ void PhysicsWorld::solve(float dt) {
         if (postStabilize)
             currentAlpha = (it < iterations) ? 1.f : 0.f;
 
-        // Steps 8-25: color loop — all vertices in a color update simultaneously.
         for (uint32_t c = 0; c < numColors; c++) {
-            // Steps 9-20: compute x_new for each body in this color 
             std::for_each(std::execution::par_unseq,
                 color_groups[c].begin(), color_groups[c].end(),
                 [&](uint32_t bi) {
-                    RigidBody2& rb = bodies[bi];
+                    RigidBody& rb = bodies[bi];
 
                     Mat3      lhs = mat3_diag(rb.mass, rb.mass, rb.inertia) / (dt * dt);
                     glm::vec3 rhs = lhs * (rb.position - rb.inertial);
@@ -323,7 +328,6 @@ void PhysicsWorld::solve(float dt) {
                     x_new[bi] = rb.position - mat3_solve(lhs, rhs);
                 });
 
-            // Steps 22-24: apply buffered positions for this color 
             std::for_each(std::execution::par_unseq,
                 color_groups[c].begin(), color_groups[c].end(),
                 [&](uint32_t bi) {
@@ -331,7 +335,6 @@ void PhysicsWorld::solve(float dt) {
                 });
         }
 
-        // Steps 26-35: lambda and penalty update over all forces
         if (it < iterations) {
             std::for_each(std::execution::par_unseq,
                 forces.begin(), forces.end(),
@@ -352,16 +355,13 @@ void PhysicsWorld::solve(float dt) {
         if (it == iterations - 1) {
             for (uint32_t i = 0; i < (uint32_t)bodies.size(); i++) {
                 if (!active[i]) continue;
-                RigidBody2& rb = bodies[i];
+                RigidBody& rb = bodies[i];
                 rb.prev_velocity = rb.velocity;
                 if (rb.inv_mass > 0.f)
                     rb.velocity = (rb.position - rb.initial) / dt;
             }
         }
     }
-
-    auto t3 = std::chrono::system_clock::now();
-    stats.solver_ms = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count() / 1000.f;
 }
 
 void PhysicsWorld::step(float dt) {

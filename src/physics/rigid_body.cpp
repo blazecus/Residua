@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <glm/gtx/rotate_vector.hpp>
 
-AABB RigidBody2::generate_AABB() {
+AABB RigidBody::generate_AABB() {
     glm::vec2 mn( 1e20f,  1e20f);
     glm::vec2 mx(-1e20f, -1e20f);
     for (const glm::vec2& v : shape) {
@@ -13,20 +13,20 @@ AABB RigidBody2::generate_AABB() {
     return { mn, mx };
 }
 
-void RigidBody2::generate_shape() {
+void RigidBody::generate_shape() {
     shape = ::generate_shape(sprite.width, sprite.height, sprite.pixels);
     glm::vec2 half(sprite.width * 0.5f, sprite.height * 0.5f);
     for (auto& v : shape)
         v -= half + com_local;
 }
 
-void RigidBody2::generate_sdf() {
+void RigidBody::generate_sdf() {
     sdf   = ::generate_sdf(sprite, shape, com_local, SDF_SCALE);
     sdf_w = sprite.width  * SDF_SCALE;
     sdf_h = sprite.height * SDF_SCALE;
 }
 
-void RigidBody2::compute_mass_properties(float density) {
+void RigidBody::compute_mass_properties(float density) {
     float     pixel_count = 0.f;
     glm::vec2 centroid(0.f);
 

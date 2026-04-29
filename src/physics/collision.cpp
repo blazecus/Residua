@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <limits>
 
-static float sample_sdf(const RigidBody2& body, glm::vec2 img_pos)
+static float sample_sdf(const RigidBody& body, glm::vec2 img_pos)
 {
     float px = img_pos.x;
     float py = img_pos.y;
@@ -33,7 +33,7 @@ static float sample_sdf(const RigidBody2& body, glm::vec2 img_pos)
          + sample_px(x1, y1) *        fx  *        fy;
 }
 
-static glm::vec2 sdf_gradient(const RigidBody2& body, glm::vec2 img_pos)
+static glm::vec2 sdf_gradient(const RigidBody& body, glm::vec2 img_pos)
 {
     float dx = sample_sdf(body, img_pos + glm::vec2(1.f, 0.f))
              - sample_sdf(body, img_pos - glm::vec2(1.f, 0.f));
@@ -42,7 +42,7 @@ static glm::vec2 sdf_gradient(const RigidBody2& body, glm::vec2 img_pos)
     return { dx * 0.5f, dy * 0.5f };
 }
 
-static glm::vec2 local_to_image(const RigidBody2& body, glm::vec2 local_pt)
+static glm::vec2 local_to_image(const RigidBody& body, glm::vec2 local_pt)
 {
     float sf = (float)SDF_SCALE;
     return local_pt * sf + body.com_local * sf + glm::vec2(body.sdf_w * 0.5f, body.sdf_h * 0.5f);
@@ -89,7 +89,7 @@ struct Candidate {
 };
 
 static void collect_candidates(
-    const RigidBody2& ref, const RigidBody2& other,
+    const RigidBody& ref, const RigidBody& other,
     float normal_sign,
     std::vector<Candidate>& out)
 {
@@ -135,7 +135,7 @@ static void collect_candidates(
     }
 }
 
-std::vector<ManifoldPoint> build_manifold(const RigidBody2& a, const RigidBody2& b)
+std::vector<ManifoldPoint> build_manifold(const RigidBody& a, const RigidBody& b)
 {
     std::vector<Candidate> candidates;
     collect_candidates(a, b, +1.f, candidates);

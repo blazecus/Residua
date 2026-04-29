@@ -45,7 +45,6 @@ VkDescriptorBufferInfo buffer_info(VkBuffer buffer, VkDeviceSize offset, VkDevic
 
 VkImageCreateInfo image_create_info(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent);
 VkImageViewCreateInfo imageview_create_info(VkFormat format, VkImage image, VkImageAspectFlags aspectFlags);
-VkImageViewCreateInfo imageview_create_cubemap_info(VkFormat format, VkImage image, VkImageAspectFlags aspectFlags);
 VkPipelineLayoutCreateInfo pipeline_layout_create_info();
 VkPipelineShaderStageCreateInfo pipeline_shader_stage_create_info(VkShaderStageFlagBits stage,
     VkShaderModule shaderModule,

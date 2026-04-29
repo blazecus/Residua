@@ -18,7 +18,7 @@ public:
     SDL_Cursor* cursor;
 
     ResiduaEngine  engine;
-    PhysicsEngine  cpu_physics;
+    PhysicsEngine  physics_engine;
 
     bool freeze_rendering{ false };
     bool fpsLimit = true;

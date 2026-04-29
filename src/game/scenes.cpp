@@ -1,5 +1,6 @@
 #include "scenes.h"
 #include <src/physics/joint.h>
+#include <src/physics/spring.h>
 #include <src/renderer/residua_engine.h>
 #include <fstream>
 #include <sstream>
@@ -28,7 +29,7 @@ void SceneManager::load(int idx) {
 }
 
 uint32_t SceneManager::spawn_body(const LoadedBodyImage& img, glm::vec2 world_pos) {
-    RigidBody2 rb;
+    RigidBody rb;
     rb.sprite = img;
     rb.compute_mass_properties();
     rb.generate_shape();
@@ -44,9 +45,9 @@ static LoadedBodyImage make_rect_image(uint32_t w, uint32_t h) {
     return img;
 }
 
-static RigidBody2 make_body(const LoadedBodyImage& img, float x, float y,
+static RigidBody make_body(const LoadedBodyImage& img, float x, float y,
                             bool is_static, float density = 1.f) {
-    RigidBody2 rb;
+    RigidBody rb;
     rb.sprite   = img;
     rb.density  = density;
     rb.compute_mass_properties(density);
@@ -122,7 +123,7 @@ void SceneManager::load_file(const std::string& path) {
             auto img = make_rect_image(std::max(1u, (uint32_t)std::round(w)),
                                        std::max(1u, (uint32_t)std::round(h)));
             bool is_static = (type == "sb");
-            RigidBody2 rb = make_body(img, cx, cy, is_static, density);
+            RigidBody rb = make_body(img, cx, cy, is_static, density);
             rb.collision_layer = layer;
             rb.collision_mask  = mask;
             rb.angular_damping = ang_damp;
@@ -145,7 +146,7 @@ void SceneManager::load_file(const std::string& path) {
                 it = img_cache.emplace(img_path, load_body_image(img_path.c_str())).first;
 
             bool is_static = (type == "sb");
-            RigidBody2 rb = make_body(it->second, x, y, is_static, density);
+            RigidBody rb = make_body(it->second, x, y, is_static, density);
             rb.collision_layer = layer;
             rb.collision_mask  = mask;
             rb.angular_damping = ang_damp;
@@ -208,7 +209,7 @@ void SceneManager::load_file(const std::string& path) {
                     auto img = make_rect_image(
                         std::max(1u, (uint32_t)std::round(bw)),
                         std::max(1u, (uint32_t)std::round(bh)));
-                    RigidBody2 rb = make_body(img, x0 + c * spacing, y0 + r * spacing,
+                    RigidBody rb = make_body(img, x0 + c * spacing, y0 + r * spacing,
                                               is_static, density);
                     rb.collision_layer = layer;
                     rb.collision_mask  = mask;

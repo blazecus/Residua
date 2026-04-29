@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include "residua_engine.h"
 
 
@@ -43,59 +43,10 @@ void ResiduaEngine::init(
 
     init_descriptors();
 
-    init_pipelines();
-
-    init_default_data();
-
     init_imgui();
 
     // everything went fine
     _isInitialized = true;
-}
-
-void ResiduaEngine::init_pipelines()
-{
-    // COMPUTE PIPELINES
-    init_background_pipelines();
-
-}
-
-void ResiduaEngine::init_default_data() {
-    //3 default textures, white, grey, black. 1 pixel each
-    uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
-    _whiteImage = create_image((void*)&white, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
-
-    uint32_t grey = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1));
-    _greyImage = create_image((void*)&grey, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
-
-    uint32_t black = glm::packUnorm4x8(glm::vec4(0, 0, 0, 0));
-    _blackImage = create_image((void*)&black, VkExtent3D{ 1, 1, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
-
-    //checkerboard image
-    uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
-    std::array<uint32_t, 16 * 16 > pixels; //for 16x16 checkerboard texture
-    for (int x = 0; x < 16; x++) {
-        for (int y = 0; y < 16; y++) {
-            pixels[y * 16 + x] = ((x % 2) ^ (y % 2)) ? magenta : black;
-        }
-    }
-
-    _errorCheckerboardImage = create_image(pixels.data(), VkExtent3D{ 16, 16, 1 }, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_SAMPLED_BIT);
-
-    VkSamplerCreateInfo sampl = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-
-    sampl.magFilter = VK_FILTER_NEAREST;
-    sampl.minFilter = VK_FILTER_NEAREST;
-
-    vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerNearest);
-
-    sampl.magFilter = VK_FILTER_LINEAR;
-    sampl.minFilter = VK_FILTER_LINEAR;
-    vkCreateSampler(_device, &sampl, nullptr, &_defaultSamplerLinear);
 }
 
 void ResiduaEngine::cleanup()
@@ -125,8 +76,8 @@ void ResiduaEngine::cleanup()
 
 void ResiduaEngine::draw_main(VkCommandBuffer cmd)
 {
-	if (cpu_physics) {
-		cpu_physics->dispatch(cmd, _dt);
+	if (physics_engine) {
+		physics_engine->dispatch(cmd, _dt);
 	}
 }
 
@@ -156,8 +107,8 @@ void ResiduaEngine::draw()
         resize_requested = true;
 		return ;
 	}
-	_drawExtent.height = std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * 1.f;
-	_drawExtent.width = std::min(_swapchainExtent.width, _drawImage.imageExtent.width) *  1.f;
+	_drawExtent.height = std::min(_swapchainExtent.height, _drawImage.imageExtent.height);
+	_drawExtent.width  = std::min(_swapchainExtent.width,  _drawImage.imageExtent.width);
 
 	VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
 
@@ -180,7 +131,7 @@ void ResiduaEngine::draw()
 
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	AllocatedImage* phys_out = cpu_physics ? &cpu_physics->output_screen : nullptr;
+	AllocatedImage* phys_out = physics_engine ? &physics_engine->output_screen : nullptr;
 	if (phys_out) {
 		vkutil::transition_image(cmd, phys_out->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		vkutil::copy_image_to_image(cmd, phys_out->image, _swapchainImages[swapchainImageIndex],
@@ -203,14 +154,14 @@ void ResiduaEngine::draw()
 	//finalize the command buffer (we can no longer add commands, but it can now be executed)
 	VK_CHECK(vkEndCommandBuffer(cmd));
 
-	//prepare the submission to the queue. 
+	//prepare the submission to the queue.
 	//we want to wait on the _presentSemaphore, as that semaphore is signaled when the swapchain is ready
 	//we will signal the _renderSemaphore, to signal that rendering has finished
 
 	VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
 
 	VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, get_current_frame()._swapchainSemaphore);
-	VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, get_current_frame()._renderSemaphore);
+	VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, _renderSemaphores[swapchainImageIndex]);
 
 	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
 
@@ -220,14 +171,14 @@ void ResiduaEngine::draw()
 
 	//prepare present
 	// this will put the image we just rendered to into the visible window.
-	// we want to wait on the _renderSemaphore for that, 
+	// we want to wait on the _renderSemaphore for that,
 	// as its necessary that drawing commands have finished before the image is displayed to the user
 	VkPresentInfoKHR presentInfo = vkinit::present_info();
 
 	presentInfo.pSwapchains = &_swapchain;
 	presentInfo.swapchainCount = 1;
 
-	presentInfo.pWaitSemaphores = &get_current_frame()._renderSemaphore;
+	presentInfo.pWaitSemaphores = &_renderSemaphores[swapchainImageIndex];
 	presentInfo.waitSemaphoreCount = 1;
 
 	presentInfo.pImageIndices = &swapchainImageIndex;
@@ -336,10 +287,6 @@ AllocatedImage ResiduaEngine::create_image(VkExtent3D size, VkFormat format, VkI
     VK_CHECK(vkCreateImageView(_device, &view_info, nullptr, &newImage.imageView));
 
     return newImage;
-}
-
-void ResiduaEngine::init_background_pipelines()
-{
 }
 
 AllocatedImage ResiduaEngine::create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped)
@@ -451,10 +398,10 @@ void ResiduaEngine::init_vulkan()
 	features13.synchronization2 = true;
 	features13.maintenance4 = true;
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-   
+
    VkPhysicalDeviceVulkan12Features features12 {};
    features12.bufferDeviceAddress = true;
-   features12.descriptorIndexing = true; 
+   features12.descriptorIndexing = true;
    features12.descriptorBindingPartiallyBound = true;
    features12.descriptorBindingVariableDescriptorCount = true;
    features12.runtimeDescriptorArray = true;
@@ -466,7 +413,6 @@ void ResiduaEngine::init_vulkan()
     vkb::PhysicalDeviceSelector selector { vkb_inst };
     vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 3).set_required_features_13(features13).set_required_features_12(features12).set_surface(_surface).select().value();
 
-    // physicalDevice.features.
     // create the final vulkan device
 
     vkb::DeviceBuilder deviceBuilder { physicalDevice };
@@ -551,21 +497,26 @@ void ResiduaEngine::create_swapchain(uint32_t width, uint32_t height)
 		.value();
 
 	_swapchainExtent = vkbSwapchain.extent;
-	//store swapchain and its related images
 	_swapchain = vkbSwapchain.swapchain;
 	_swapchainImages = vkbSwapchain.get_images().value();
 	_swapchainImageViews = vkbSwapchain.get_image_views().value();
 
+	VkSemaphoreCreateInfo semInfo = vkinit::semaphore_create_info();
+	_renderSemaphores.resize(_swapchainImages.size());
+	for (auto& sem : _renderSemaphores)
+		VK_CHECK(vkCreateSemaphore(_device, &semInfo, nullptr, &sem));
 }
+
 void ResiduaEngine::destroy_swapchain()
 {
 	vkDestroySwapchainKHR(_device, _swapchain, nullptr);
 
-	// destroy swapchain resources
-	for (int i = 0; i < _swapchainImageViews.size(); i++) {
-		vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
-	}
+	for (auto view : _swapchainImageViews)
+		vkDestroyImageView(_device, view, nullptr);
 
+	for (auto sem : _renderSemaphores)
+		vkDestroySemaphore(_device, sem, nullptr);
+	_renderSemaphores.clear();
 }
 
 void ResiduaEngine::resize_swapchain()
@@ -631,12 +582,10 @@ void ResiduaEngine::init_sync_structures()
         VkSemaphoreCreateInfo semaphoreCreateInfo = vkinit::semaphore_create_info();
 
         VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._swapchainSemaphore));
-        VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._renderSemaphore));
 
         _mainDeletionQueue.push_function([=]() {
             vkDestroyFence(_device, _frames[i]._renderFence, nullptr);
             vkDestroySemaphore(_device, _frames[i]._swapchainSemaphore, nullptr);
-            vkDestroySemaphore(_device, _frames[i]._renderSemaphore, nullptr);
         });
     }
 }
@@ -708,20 +657,7 @@ void ResiduaEngine::init_imgui()
 
 void ResiduaEngine::init_descriptors()
 {
-    // TODO
-        // create a descriptor pool
-    std::vector<DescriptorAllocator::PoolSizeRatio> sizes = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 },
-    };
-
-    globalDescriptorAllocator.init_pool(_device, 10, sizes);
-    _mainDeletionQueue.push_function(
-        [&]() { vkDestroyDescriptorPool(_device, globalDescriptorAllocator.pool, nullptr); });
-
     for (int i = 0; i < FRAME_OVERLAP; i++) {
-        // create a descriptor pool
         std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> frame_sizes = {
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
@@ -735,26 +671,4 @@ void ResiduaEngine::init_descriptors()
             _frames[i]._frameDescriptors.destroy_pools(_device);
             });
     }
-
-}
-
-TextureID TextureCache::AddTexture(const VkImageView& image, VkSampler sampler)
-{
-    for (unsigned int i = 0; i < Cache.size(); i++) {
-        if (Cache[i].imageView == image && Cache[i].sampler == sampler) {
-            //found, return it
-            return TextureID{i};
-        }
-    }
-
-	uint32_t idx = Cache.size();
-
-	Cache.push_back(VkDescriptorImageInfo{ .sampler = sampler,.imageView = image, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
-
-	return TextureID{ idx };
-}
-
-void ResiduaEngine::set_window(SDL_Window* window, VkExtent2D& extent){
-    _window = window;
-    _windowExtent = extent;
 }

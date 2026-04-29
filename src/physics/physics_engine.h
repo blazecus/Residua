@@ -125,8 +125,13 @@ private:
     void grow_buffers(ResiduaEngine* engine, uint32_t needed_bodies, uint32_t needed_pixels);
     void grow_sdf_buffer(ResiduaEngine* engine, uint32_t needed_floats);
 
+    void     run_coloring();
+    void     run_manifold_gen();
+    uint32_t upload_draw_data();
+    void     run_draw(VkCommandBuffer cmd, uint32_t active_count);
+
 public:
-    uint32_t add_body(ResiduaEngine* engine, RigidBody2 body);
+    uint32_t add_body(ResiduaEngine* engine, RigidBody body);
     uint32_t add_static_rect(ResiduaEngine* engine, glm::vec2 center, float w, float h);
 
     void remove_body(uint32_t idx);

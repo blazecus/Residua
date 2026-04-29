@@ -33,7 +33,7 @@ struct PhysicsWorld {
     int   iterations{ 10 };
     bool  postStabilize{ true };
 
-    std::vector<RigidBody2>  bodies;
+    std::vector<RigidBody>  bodies;
     std::vector<bool>        active;
     std::vector<uint32_t>    open_slots;
 
@@ -49,14 +49,21 @@ struct PhysicsWorld {
     std::vector<uint32_t> colors;
     uint32_t              max_color{0};
 
-    uint32_t    add_body(RigidBody2& rb);
+    uint32_t    add_body(RigidBody& rb);
     uint32_t    add_static_rect(glm::vec2 center, float w, float h);
     void        remove_body(uint32_t index);
     void        add_force(std::unique_ptr<Force> f);
     void        remove_force(Force* f);
-    RigidBody2& get_body(uint32_t index);
+    RigidBody& get_body(uint32_t index);
 
     void prepare();
     void solve(float dt);
     void step(float dt);
+
+private:
+    void build_lbvh(std::vector<AABB>& boxes, std::vector<uint32_t>& index_map);
+    void broadphase(const std::vector<AABB>& boxes, const std::vector<uint32_t>& index_map);
+    void warm_start(float dt);
+    void predict(float dt);
+    void iterate(float dt);
 };
