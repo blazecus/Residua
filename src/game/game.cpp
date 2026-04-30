@@ -24,7 +24,7 @@ void Game::init() {
 
     ball_image = load_body_image("../assets/physics/ball.png");
     cshape     = load_body_image("../assets/physics/cshape.png");
-    star       = load_body_image("../assets/physics/star.png");
+    star       = load_body_image("../assets/physics/boom.png");
 
     physics_engine.init(&engine);
     engine.physics_engine = &physics_engine;
@@ -115,6 +115,7 @@ void Game::run() {
         engine.process_player_update(temp_player_position);
 
         client.update();
+        scene_manager.update(delta);
 
         if (input.blou(InputManager::InputType::FORWARD)) {
             scene_manager.spawn_body(ball_image, physics_mouse());

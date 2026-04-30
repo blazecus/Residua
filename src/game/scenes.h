@@ -2,6 +2,7 @@
 
 #include <src/physics/physics_engine.h>
 #include <src/physics/body_image.h>
+#include <src/game/player/player_character.h>
 #include <string>
 
 class ResiduaEngine;
@@ -12,9 +13,10 @@ struct SceneEntry {
 };
 
 static constexpr SceneEntry SCENE_LIST[] = {
-    { "Rope",     "../assets/scenes/spring_chain.scene" },
-    { "Free Play","../assets/scenes/free_play.scene"    },
-    { "Softbody", "../assets/scenes/softbody.scene"     },
+    { "Rope",        "../assets/scenes/spring_chain.scene" },
+    { "Free Play",   "../assets/scenes/free_play.scene"    },
+    { "Softbody",    "../assets/scenes/softbody.scene"     },
+    { "Player Test", "../assets/scenes/player_test.scene"  },
 };
 static constexpr int NUM_SCENES = sizeof(SCENE_LIST) / sizeof(SCENE_LIST[0]);
 
@@ -27,13 +29,15 @@ struct SceneManager {
 
     int current_scene { -1 };
 
+    PlayerCharacter player;
+
     void init(PhysicsEngine* phys, ResiduaEngine* eng,
               const LoadedBodyImage* ball, const LoadedBodyImage* cs,
               const LoadedBodyImage* st);
 
     void clear();
-
     void load(int idx);
+    void update(float dt);
 
     uint32_t spawn_body(const LoadedBodyImage& img, glm::vec2 world_pos);
 

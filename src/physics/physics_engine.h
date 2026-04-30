@@ -10,6 +10,20 @@
 
 class ResiduaEngine;
 
+struct ContactInfo {
+    uint32_t  other_id;
+    glm::vec2 point;
+    glm::vec2 normal;  // points away from other_id toward the queried body
+    float     depth;
+};
+
+struct RaycastHit {
+    uint32_t  body_id;
+    glm::vec2 point;
+    glm::vec2 normal;
+    float     distance;
+};
+
 static constexpr uint32_t PHYSICS_WIDTH    = 480;
 static constexpr uint32_t PHYSICS_HEIGHT   = 270;
 static constexpr uint32_t MAX_GPU_CONTACTS = 16384;
@@ -142,4 +156,35 @@ public:
     void dispatch(VkCommandBuffer cmd, float dt);
 
     PhysicsStats get_stats();
+
+    // ── Body state ─────────────────────────────────────────────────────────────
+    bool      body_valid(uint32_t id) const;
+    bool      is_static (uint32_t id) const;
+
+    glm::vec2 get_position        (uint32_t id) const;
+    float     get_rotation        (uint32_t id) const;
+    glm::vec2 get_velocity        (uint32_t id) const;
+    float     get_angular_velocity(uint32_t id) const;
+
+    void set_position        (uint32_t id, glm::vec2 pos);
+    void set_rotation        (uint32_t id, float angle);
+    void set_velocity        (uint32_t id, glm::vec2 vel);
+    void set_angular_velocity(uint32_t id, float omega);
+
+    // ── Forces & impulses ──────────────────────────────────────────────────────
+    void apply_force      (uint32_t id, glm::vec2 force);
+    void apply_force_at   (uint32_t id, glm::vec2 force, glm::vec2 world_point);
+    void apply_torque     (uint32_t id, float torque);
+    void apply_impulse    (uint32_t id, glm::vec2 impulse);
+    void apply_impulse_at (uint32_t id, glm::vec2 impulse, glm::vec2 world_point);
+
+    // ── Collision queries ──────────────────────────────────────────────────────
+    std::vector<ContactInfo> get_contacts(uint32_t id) const;
+    bool                     is_touching (uint32_t a, uint32_t b) const;
+
+    // ── Raycasts ───────────────────────────────────────────────────────────────
+    std::optional<RaycastHit>    raycast    (glm::vec2 origin, glm::vec2 dir, float max_dist,
+                                             uint32_t mask = 0xFFFFFFFFu) const;
+    std::vector<RaycastHit>      raycast_all(glm::vec2 origin, glm::vec2 dir, float max_dist,
+                                             uint32_t mask = 0xFFFFFFFFu) const;
 };

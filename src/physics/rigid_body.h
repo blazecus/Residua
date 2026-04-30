@@ -31,6 +31,9 @@ struct RigidBody {
     uint32_t collision_layer{0x00000001u};
     uint32_t collision_mask {0xFFFFFFFFu};
 
+    glm::vec2 ext_force {0.f};
+    float     ext_torque{0.f};
+
     // Bodies connected by non-contact forces (joints). Maintained incrementally
     std::vector<uint32_t> joint_connected;
 

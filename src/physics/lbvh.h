@@ -208,6 +208,57 @@ inline void lbvh_query_point(const LBVH& lbvh, const glm::vec2& p, float rq, std
     if (!lbvh.nodes.empty()) query_recurse(0);
 }
 
+inline bool lbvh_ray_vs_aabb(const AABB& box, glm::vec2 origin, glm::vec2 dir, float max_dist)
+{
+    float t_min = 0.f, t_max = max_dist;
+    for (int axis = 0; axis < 2; axis++) {
+        float d  = (&dir.x)[axis];
+        float o  = (&origin.x)[axis];
+        float lo = (&box.min.x)[axis];
+        float hi = (&box.max.x)[axis];
+        if (std::abs(d) < 1e-9f) {
+            if (o < lo || o > hi) return false;
+        } else {
+            float t1 = (lo - o) / d, t2 = (hi - o) / d;
+            if (t1 > t2) std::swap(t1, t2);
+            t_min = std::max(t_min, t1);
+            t_max = std::min(t_max, t2);
+            if (t_min > t_max) return false;
+        }
+    }
+    return true;
+}
+
+// Returns box-array indices (map through lbvh_index_map to get body indices).
+inline void lbvh_query_ray(const LBVH& lbvh, glm::vec2 origin, glm::vec2 dir, float max_dist,
+                            std::vector<int>& results)
+{
+    results.clear();
+    if (lbvh.nodes.empty()) {
+        // 0 or 1 bodies — no internal nodes, test leaves directly
+        for (int j : lbvh.sorted)
+            if (lbvh_ray_vs_aabb(lbvh.boxes[j], origin, dir, max_dist))
+                results.push_back(j);
+        return;
+    }
+
+    std::function<void(int)> recurse;
+    recurse = [&](int i) {
+        if (i < 0) {
+            int j = lbvh.sorted[-i - 1];
+            if (lbvh_ray_vs_aabb(lbvh.boxes[j], origin, dir, max_dist))
+                results.push_back(j);
+            return;
+        }
+        const LBVHNode& node = lbvh.nodes[i];
+        if (lbvh_ray_vs_aabb(node.box, origin, dir, max_dist)) {
+            recurse(node.left);
+            recurse(node.right);
+        }
+    };
+    recurse(0); // root is always at index 0
+}
+
 inline void lbvh_query_AABB(const LBVH& lbvh, const AABB& box, std::vector<int>& results) {
     results.clear();
 

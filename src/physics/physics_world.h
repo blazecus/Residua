@@ -46,6 +46,8 @@ struct PhysicsWorld {
 
     std::unordered_map<uint64_t, std::vector<ManifoldPoint>> precomputed_contacts;
 
+    std::vector<uint32_t> lbvh_index_map; // box index → body index, valid after prepare()
+
     std::vector<uint32_t> colors;
     uint32_t              max_color{0};
 

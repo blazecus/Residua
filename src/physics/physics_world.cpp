@@ -149,6 +149,7 @@ void PhysicsWorld::build_lbvh(std::vector<AABB>& boxes, std::vector<uint32_t>& i
         index_map.push_back(i);
     }
     lbvh_build(lbvh, boxes);
+    lbvh_index_map = index_map;
 }
 
 void PhysicsWorld::broadphase(const std::vector<AABB>& boxes, const std::vector<uint32_t>& index_map) {
@@ -254,8 +255,14 @@ void PhysicsWorld::predict(float dt) {
         RigidBody& rb = bodies[i];
 
         rb.velocity.z = std::clamp(rb.velocity.z, -50.f, 50.f);
-        if (rb.inv_mass > 0.f)
+        if (rb.inv_mass > 0.f) {
             rb.velocity.z *= rb.angular_damping;
+            rb.velocity.x += rb.ext_force.x * rb.inv_mass   * dt;
+            rb.velocity.y += rb.ext_force.y * rb.inv_mass   * dt;
+            rb.velocity.z += rb.ext_torque  * rb.inv_inertia * dt;
+            rb.ext_force  = {0.f, 0.f};
+            rb.ext_torque = 0.f;
+        }
 
         rb.inertial = rb.position + rb.velocity * dt;
         if (rb.inv_mass > 0.f)

@@ -15,11 +15,17 @@ void SceneManager::init(PhysicsEngine* phys, ResiduaEngine* eng,
 {
     physics = phys; engine = eng;
     ball_image = ball; cshape = cs; star = st;
+    player.load_assets();
 }
 
 void SceneManager::clear() {
+    player.despawn(*physics);
     physics->clear();
     current_scene = -1;
+}
+
+void SceneManager::update(float dt) {
+    player.update(*physics, dt);
 }
 
 void SceneManager::load(int idx) {
@@ -108,7 +114,13 @@ void SceneManager::load_file(const std::string& path) {
         std::string kw;
         if (!(ss >> kw)) continue;
 
-        if (kw == "rect") {
+        if (kw == "player") {
+            auto f = parse_fields(ss);
+            float x = getf(f, "x", float(PHYSICS_WIDTH)  * 0.5f);
+            float y = getf(f, "y", float(PHYSICS_HEIGHT) * 0.5f);
+            player.spawn(*physics, *engine, {x, y});
+        }
+        else if (kw == "rect") {
             auto f = parse_fields(ss);
             std::string type = gets(f, "type", "rb");
             float cx   = getf(f, "cx");

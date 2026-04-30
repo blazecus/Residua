@@ -58,6 +58,9 @@ add_executable (Residua
   src/physics/spring.h
   src/physics/physics_engine.cpp
   src/physics/physics_engine.h
+  src/physics/physics_api.cpp
+  src/game/player/player_character.h
+  src/game/player/player_character.cpp
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
