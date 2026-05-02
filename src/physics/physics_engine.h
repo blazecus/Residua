@@ -24,6 +24,8 @@ struct RaycastHit {
     float     distance;
 };
 
+static constexpr uint32_t COLLISION_MASK_ALL = 0xFFFFFFFFu;
+
 static constexpr uint32_t PHYSICS_WIDTH    = 480;
 static constexpr uint32_t PHYSICS_HEIGHT   = 270;
 static constexpr uint32_t MAX_GPU_CONTACTS = 16384;

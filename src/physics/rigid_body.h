@@ -34,6 +34,8 @@ struct RigidBody {
     glm::vec2 ext_force {0.f};
     float     ext_torque{0.f};
 
+    bool visible{true};
+
     // Bodies connected by non-contact forces (joints). Maintained incrementally
     std::vector<uint32_t> joint_connected;
 

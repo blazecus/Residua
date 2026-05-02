@@ -92,6 +92,41 @@ void DistanceJoint::computeDerivatives(uint32_t bi) {
     }
 }
 
+// ─── LeaderJoint ─────────────────────────────────────────────────────────────
+
+LeaderJoint::LeaderJoint(PhysicsWorld* world, uint32_t leader, uint32_t follower,
+                         glm::vec2 rA_local, glm::vec2 rB_local, float stiffness)
+    : Force(world, leader, follower), rA_local(rA_local), rB_local(rB_local)
+{
+    float pos_start = std::isinf(stiffness) ? AVBD_PENALTY_MAX * 0.01f : stiffness;
+    this->stiffness[0] = this->stiffness[1] = stiffness;
+    this->penalty[0]   = this->penalty[1]   = pos_start;
+}
+
+bool LeaderJoint::initialize() {
+    return world->active[bodyA] && world->active[bodyB];
+}
+
+void LeaderJoint::computeConstraint(float /*alpha*/) {
+    const RigidBody& ba = world->bodies[bodyA];
+    const RigidBody& bb = world->bodies[bodyB];
+
+    glm::vec2 pA = glm::vec2(ba.position) + glm::rotate(rA_local, ba.position.z);
+    glm::vec2 pB = glm::vec2(bb.position) + glm::rotate(rB_local, bb.position.z);
+
+    C[0] = pB.x - pA.x;
+    C[1] = pB.y - pA.y;
+}
+
+void LeaderJoint::computeDerivatives(uint32_t bi) {
+    if (bi != bodyB) return;
+    glm::vec2 rBw = glm::rotate(rB_local, world->bodies[bodyB].position.z);
+    J[0] = {  1.f, 0.f, -rBw.y };
+    J[1] = {  0.f, 1.f,  rBw.x };
+    H[0] = {}; H[0].row[2].z = -rBw.x;
+    H[1] = {}; H[1].row[2].z = -rBw.y;
+}
+
 // ─── MouseDrag ────────────────────────────────────────────────────────────────
 
 MouseDrag::MouseDrag(PhysicsWorld* world, uint32_t bodyA,

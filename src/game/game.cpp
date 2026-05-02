@@ -115,6 +115,9 @@ void Game::run() {
         engine.process_player_update(temp_player_position);
 
         client.update();
+        scene_manager.player.move_dir =
+            input.flou(InputManager::InputType::RIGHT) -
+            input.flou(InputManager::InputType::LEFT);
         scene_manager.update(delta);
 
         if (input.blou(InputManager::InputType::FORWARD)) {

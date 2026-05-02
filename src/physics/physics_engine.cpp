@@ -421,7 +421,7 @@ void PhysicsEngine::clear()
 
 std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
 {
-    for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
+    for (int i = (int)world.bodies.size() - 1; i >= 0; i--) {
         if (!world.active[i]) continue;
         const RigidBody&   rb  = world.bodies[i];
         const BodyGPUInfo& bdi = body_draw_info[i];
@@ -660,6 +660,7 @@ uint32_t PhysicsEngine::upload_draw_data()
 
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
+        if (!world.bodies[i].visible) continue;
         if (i >= (uint32_t)body_draw_info.size()) continue;
         const BodyGPUInfo& bdi = body_draw_info[i];
         if (bdi.body_w == 0 || bdi.body_h == 0) continue;
