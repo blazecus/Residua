@@ -120,6 +120,7 @@ void Game::run() {
         scene_manager.player.move_dir =
             input.flou(InputManager::InputType::RIGHT) -
             input.flou(InputManager::InputType::LEFT);
+        scene_manager.player.walking = input.blou(InputManager::InputType::CROUCH);
         scene_manager.update(delta);
 
         if (input.blou(InputManager::InputType::FORWARD)) {
@@ -129,8 +130,8 @@ void Game::run() {
             scene_manager.spawn_body(cshape, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 10) {
-            scene_manager.spawn_body(star, physics_mouse());
-            lastSpawn = 0;
+            // scene_manager.spawn_body(star, physics_mouse());
+            // lastSpawn = 0;
         }
 
         if (input.blou(InputManager::InputType::INSPECT)) {

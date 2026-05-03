@@ -57,9 +57,11 @@ void UIManager::draw() {
     PlayerCharacter& player = scenes->player;
     if (player.is_valid()) {
         ImGui::Begin("Player");
-        ImGui::SliderFloat("Step time",       &player.step_time,          0.05f, 1.f);
-        ImGui::SliderFloat("Step length",     &player.step_length_test,   0.f,   200.f);
-        ImGui::SliderFloat("Leg angle speed", &player.max_leg_angle_speed, 1.f,  50.f);
+        ImGui::SliderFloat("Step time",        &player.step_time,           0.05f, 1.f);
+        ImGui::SliderFloat("Step length",      &player.step_length_test,    0.f,   200.f);
+        ImGui::SliderFloat("Leg angle speed",  &player.max_leg_angle_speed,  1.f,  50.f);
+        ImGui::SliderFloat("Upright stiffness",&player.upright_stiffness,    0.f,  30.f);
+        ImGui::SliderFloat("Forward lean",     &player.forward_lean,         0.f,   0.6f);
         ImGui::End();
     }
 

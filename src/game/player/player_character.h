@@ -38,6 +38,12 @@ enum class JointID : uint32_t {
     Count
 };
 
+enum class AnimationLegState : uint32_t {
+    Stationary = 0,
+    Walking,
+    Running
+};
+
 struct PlayerJoint {
     DistanceJoint* joint         { nullptr }; 
     float          desired_angle { 0.f };
@@ -73,14 +79,19 @@ struct PlayerCharacter {
 
     // ── Movement (set each frame by the caller) ────────────────────────────────
     float move_dir          { 0.f };   // -1 = left, 0 = idle, 1 = right
+    bool  walking           { false };
     float max_speed         {180.f };
     float accel             {3000.f };
     float stride_length     { 10.f };
-    float upright_stiffness  { 12.f };
+    float upright_stiffness  {  6.f };
     float upright_damping    { 20.f };
-    float max_leg_angle_speed{ 9.8f };
-    float step_time          { 0.475f };
-    float step_length_test   { 51.f };
+    float forward_lean       { 0.18f };
+    float max_leg_angle_speed{  9.8f };
+    float step_time          { 0.44f };
+    float step_length_test   { 36.f };
+    float walk_speed = { 100.0f };
+    float stationary_speed = { 10.0f };
+    AnimationLegState animation_leg_state = AnimationLegState::Stationary;
 
     glm::vec2 foot_target_l { 0.f };
     glm::vec2 foot_target_r { 0.f };
@@ -101,7 +112,7 @@ private:
     glm::vec2 right_step_target{}, left_step_target{};
     bool right_airborne{ false };
     bool left_airborne{ false };
-    glm::vec2 airborn_foot_offset{ glm::vec2(0.0f, 30.0f) };
+    glm::vec2 airborn_foot_offset{ glm::vec2(-2.0f, 10.0f) };
 
     uint32_t spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
                         const LoadedBodyImage& img, glm::vec2 world_pos);
@@ -115,4 +126,6 @@ private:
     void animate(PhysicsEngine& pe, float dt);
 
     std::optional<glm::vec2> select_next_step(PhysicsEngine& pe, bool right);
+
+    std::optional<glm::vec2> get_standing_step(PhysicsEngine& pe, bool right);
 };

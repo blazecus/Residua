@@ -55,7 +55,7 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
 
     // Hitbox: invisible physics master, drives movement and righting
     hitbox_id = spawn_limb(pe, re, img_hitbox, pos);
-    pe.world.bodies[hitbox_id].visible =false;
+    pe.world.bodies[hitbox_id].visible         = false;
     pe.world.bodies[hitbox_id].angular_damping = 0.99f;
 
     // Torso: kinematic — position driven directly from hitbox, not solved by AVBD
@@ -140,10 +140,12 @@ void PlayerCharacter::set_desired_angle(JointID jid, float angle)
 // Analytical 2-joint IK for one leg.
 // Returns {hip_rest_angle, knee_rest_angle} suitable for DistanceJoint::rest_angle.
 static std::pair<float,float> solve_leg_ik(
-    glm::vec2 hip_world, glm::vec2 foot_target, float parent_angle)
+    glm::vec2 hip_world, glm::vec2 foot_bottom, float parent_angle)
 {
     const float L1 = 16.f, L2 = 16.f;
 
+    // foot_bottom is the desired foot-contact point; drive the ankle (L2 tip) to 16px above it
+    glm::vec2 foot_target = foot_bottom + glm::vec2(0.f, 16.f);
     glm::vec2 diff = foot_target - hip_world;
     float dist = std::clamp(glm::length(diff),
                             std::abs(L1 - L2) + 0.01f,
@@ -179,13 +181,14 @@ void PlayerCharacter::update(PhysicsEngine& pe, float dt)
     float     hbox_angle = pe.get_rotation(hitbox_id);
 
     // Proportional velocity controller on hitbox
-    float target_vx = move_dir * max_speed;
+    float target_vx = move_dir * (walking ? walk_speed : max_speed);
     pe.apply_force(hitbox_id, { (target_vx - hbox_vel.x) * accel, 0.f });
 
-    // Torsional PD on hitbox to keep it upright
-    float wrapped_angle = std::atan2(std::sin(hbox_angle), std::cos(hbox_angle));
+    // Torsional PD on hitbox — lean forward proportional to move_dir
+    float lean_target   = move_dir * forward_lean;
+    float angle_error   = std::atan2(std::sin(hbox_angle - lean_target), std::cos(hbox_angle - lean_target));
     float omega         = pe.get_angular_velocity(hitbox_id);
-    float target_omega  = -upright_stiffness * wrapped_angle;
+    float target_omega  = -upright_stiffness * angle_error;
     pe.set_angular_velocity(hitbox_id, omega + (target_omega - omega) * upright_damping * dt);
 
     // Snap torso to hitbox before the physics step.
@@ -201,8 +204,8 @@ void PlayerCharacter::update(PhysicsEngine& pe, float dt)
 
 void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
     float hvel = pe.get_velocity(hitbox_id).x;
-    if(glm::abs(hvel) > 0.0f){
-
+    if(glm::abs(hvel) > walk_speed){
+        animation_leg_state = AnimationLegState::Running;
         if (stride_counter < step_time) {
             if (right_airborne) {
                 auto maybe_next_step = select_next_step(pe, true);
@@ -212,7 +215,7 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
                 }
             }
 
-            left_step_target = position(pe) + airborn_foot_offset + 0.0f;
+            left_step_target = position(pe) + airborn_foot_offset + glm::vec2(5.0f,0.0f) + glm::vec2(16.0f, 5.0f) * stride_counter / step_time;
             left_airborne = true;
         }
         else if (stride_counter < step_time * 2.0f) {
@@ -224,20 +227,61 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
                 }
             }
 
-            right_step_target = position(pe) + airborn_foot_offset + 5.0f;
+            right_step_target = position(pe) + airborn_foot_offset + glm::vec2(16.0f, 5.0f) * stride_counter / step_time;
             right_airborne = true;
         }
-        
-        
+
         stride_counter += dt * (glm::abs(hvel) / max_speed + 0.2f);
         if (stride_counter > step_time * 2.0f) stride_counter = 0.0f;
+    }
+    else if (glm::abs(hvel) > stationary_speed) {
+        animation_leg_state = AnimationLegState::Walking;
+        if (stride_counter < step_time) {
+            if (right_airborne) {
+                auto maybe_next_step = select_next_step(pe, true);
+                if (maybe_next_step.has_value()) {
+                    right_step_target = maybe_next_step.value();
+                    right_airborne = false;
+                }
+            }
 
+            left_airborne = true;
+        }
+        else if (stride_counter < step_time * 2.0f) {
+            if (left_airborne) {
+                auto maybe_next_step = select_next_step(pe, false);
+                if (maybe_next_step.has_value()) {
+                    left_step_target = maybe_next_step.value();
+                    left_airborne = false;
+                }
+            }
+
+            right_airborne = true;
+        }
+
+        stride_counter += dt * 1.5f;
+        if (stride_counter > step_time * 2.0f) stride_counter = 0.0f;
     }
     else{
+        if (animation_leg_state != AnimationLegState::Stationary) {
+            animation_leg_state = AnimationLegState::Stationary;
+			auto maybe_next_step = get_standing_step(pe, false);
+			if (maybe_next_step.has_value()) {
+				left_step_target = maybe_next_step.value();
+                printf("%f, %f\n", left_step_target.x, left_step_target.y);
+				left_airborne = false;
+			}
+			maybe_next_step = get_standing_step(pe, true);
+			if (maybe_next_step.has_value()) {
+				right_step_target = maybe_next_step.value();
+				right_airborne = false;
+			}
+        }
         stride_counter = 0.0f;
     }
 
-    float t = 1.f - std::exp(-12.f * dt);
+    float interpolation_factor = animation_leg_state == AnimationLegState::Running ? 12.f : 7.f;
+    float t = 1.f - std::exp(-interpolation_factor * dt);
     left_step_goal  = glm::mix(left_step_goal,  left_step_target,  t);
     right_step_goal = glm::mix(right_step_goal, right_step_target, t);
 
@@ -245,8 +289,8 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
     glm::vec2 hip_l = position(pe)  + glm::rotate(glm::vec2(-8.f, 16.f), rotation(pe));
     glm::vec2 hip_r = position(pe)  + glm::rotate(glm::vec2(8.f, 16.f), rotation(pe));
 
-    auto [hl, kl] = solve_leg_ik(hip_l, left_step_goal  + glm::vec2(0.f, left_airborne ? 0.0f : 16.f ), rotation(pe));
-    auto [hr, kr] = solve_leg_ik(hip_r, right_step_goal + glm::vec2(0.f, right_airborne ? 0.0f : 16.f), rotation(pe));
+    auto [hl, kl] = solve_leg_ik(hip_l, left_step_goal, rotation(pe));
+    auto [hr, kr] = solve_leg_ik(hip_r, right_step_goal, rotation(pe));
 
     float max_d = max_leg_angle_speed * dt;
     auto approach = [&](float current, float target) {
@@ -267,7 +311,24 @@ std::optional<glm::vec2> PlayerCharacter::select_next_step(PhysicsEngine& pe, bo
 
     float step_offset = right ? 5.0f : 0.0f;
     // TODO: make constant
-    glm::vec2 origin = position(pe) + glm::vec2( step_offset + (velocity(pe).x / max_speed + glm::sign(velocity(pe).x) *0.1f) * step_length_test, 0.0f );
+    glm::vec2 origin = position(pe) + glm::vec2( step_offset + (velocity(pe).x / max_speed + glm::sign(velocity(pe).x) *0.1f) * step_length_test * (animation_leg_state == AnimationLegState::Walking ? 1.25f : 1.0f), 0.0f );
+
+    //TODO: max dist needs to be constant too
+    std::optional<RaycastHit> step_point = pe.raycast(origin, glm::vec2(0.0, 1.0), 80.0f, PLAYER_MASK);
+    if(step_point.has_value()){
+        glm::vec2 result = step_point.value().point;
+        if(result.y > position(pe).y + 20.0f){
+            return result;
+        }
+    }
+
+    return std::optional<glm::vec2>();
+}
+
+std::optional<glm::vec2> PlayerCharacter::get_standing_step(PhysicsEngine& pe, bool right){
+    float step_offset = right ? 10.0f : -10.0f;
+    // TODO: make constant
+    glm::vec2 origin = position(pe) + glm::vec2( step_offset, 0.0f );
 
     //TODO: max dist needs to be constant too
     std::optional<RaycastHit> step_point = pe.raycast(origin, glm::vec2(0.0, 1.0), 80.0f, PLAYER_MASK);
