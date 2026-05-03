@@ -1,4 +1,5 @@
 #include <src/game/game.h>
+#include <src/game/debug_draw.h>
 #include <imgui.h>
 #include <glm/gtx/rotate_vector.hpp>
 
@@ -114,6 +115,7 @@ void Game::run() {
         temp_player_position += diff;
         engine.process_player_update(temp_player_position);
 
+        DebugDraw::get().clear();
         client.update();
         scene_manager.player.move_dir =
             input.flou(InputManager::InputType::RIGHT) -

@@ -73,11 +73,14 @@ struct PlayerCharacter {
 
     // ── Movement (set each frame by the caller) ────────────────────────────────
     float move_dir          { 0.f };   // -1 = left, 0 = idle, 1 = right
-    float max_speed         { 120.f };
-    float accel             { 2000.f };
+    float max_speed         {180.f };
+    float accel             {3000.f };
     float stride_length     { 10.f };
-    float upright_stiffness { 12.f };  // target rad/s per radian of lean
-    float upright_damping   { 20.f };  // blend rate toward target angular velocity (per second)
+    float upright_stiffness  { 12.f };
+    float upright_damping    { 20.f };
+    float max_leg_angle_speed{ 9.8f };
+    float step_time          { 0.475f };
+    float step_length_test   { 51.f };
 
     glm::vec2 foot_target_l { 0.f };
     glm::vec2 foot_target_r { 0.f };
@@ -99,7 +102,6 @@ private:
     bool right_airborne{ false };
     bool left_airborne{ false };
     glm::vec2 airborn_foot_offset{ glm::vec2(0.0f, 30.0f) };
-    const float step_time = 0.3f;
 
     uint32_t spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
                         const LoadedBodyImage& img, glm::vec2 world_pos);

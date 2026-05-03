@@ -22,6 +22,8 @@ add_executable (Residua
   src/game/scenes.h
   src/game/ui.cpp
   src/game/ui.h
+  src/game/debug_draw.cpp
+  src/game/debug_draw.h
   src/game/client.cpp
   src/game/client.h
   src/renderer/residua_engine.cpp

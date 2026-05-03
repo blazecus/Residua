@@ -1,5 +1,6 @@
 #include "player_character.h"
 #include <src/renderer/residua_engine.h>
+#include <src/game/debug_draw.h>
 #include <glm/gtx/rotate_vector.hpp>
 #include <limits>
 #include <cmath>
@@ -86,7 +87,7 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
 
     const float INF      = std::numeric_limits<float>::infinity();
     const float BEND     = 10.f;
-    const float LEG_BEND = 6.f;
+    const float LEG_BEND = 7.f;
 
     // Head
     connect(pe, JointID::Neck,      Limb::Torso,     {  0, -10}, Limb::Head,      {  0,  8}, INF, BEND);
@@ -190,7 +191,7 @@ void PlayerCharacter::update(PhysicsEngine& pe, float dt)
     // Snap torso to hitbox before the physics step.
     // AVBD then resolves limb joints on top of this corrected starting position.
     uint32_t torso_id = limbs[(size_t)Limb::Torso];
-    pe.set_position(torso_id, hbox_pos + glm::vec2(0.0, -16.0));
+    pe.set_position(torso_id, hbox_pos + glm::vec2(0.0, -17.0));
     pe.set_velocity(torso_id, hbox_vel);
     pe.set_rotation(torso_id, hbox_angle);
     pe.set_angular_velocity(torso_id, pe.get_angular_velocity(hitbox_id));
@@ -228,7 +229,7 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
         }
         
         
-        stride_counter += dt * glm::abs(hvel) / max_speed;
+        stride_counter += dt * (glm::abs(hvel) / max_speed + 0.2f);
         if (stride_counter > step_time * 2.0f) stride_counter = 0.0f;
 
     }
@@ -236,7 +237,7 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
         stride_counter = 0.0f;
     }
 
-    float t = 1.f - std::exp(-5.f * dt);
+    float t = 1.f - std::exp(-12.f * dt);
     left_step_goal  = glm::mix(left_step_goal,  left_step_target,  t);
     right_step_goal = glm::mix(right_step_goal, right_step_target, t);
 
@@ -247,17 +248,26 @@ void PlayerCharacter::animate(PhysicsEngine& pe, float dt) {
     auto [hl, kl] = solve_leg_ik(hip_l, left_step_goal  + glm::vec2(0.f, left_airborne ? 0.0f : 16.f ), rotation(pe));
     auto [hr, kr] = solve_leg_ik(hip_r, right_step_goal + glm::vec2(0.f, right_airborne ? 0.0f : 16.f), rotation(pe));
 
-    joints[(size_t)JointID::HipL].desired_angle  = hl;
-    joints[(size_t)JointID::KneeL].desired_angle = kl;
-    joints[(size_t)JointID::HipR].desired_angle  = hr;
-    joints[(size_t)JointID::KneeR].desired_angle = kr;
+    float max_d = max_leg_angle_speed * dt;
+    auto approach = [&](float current, float target) {
+        float diff = std::atan2(std::sin(target - current), std::cos(target - current));
+        return current + std::clamp(diff, -max_d, max_d);
+    };
+
+    joints[(size_t)JointID::HipL].desired_angle  = approach(joints[(size_t)JointID::HipL].desired_angle,  hl);
+    joints[(size_t)JointID::KneeL].desired_angle = approach(joints[(size_t)JointID::KneeL].desired_angle, kl);
+    joints[(size_t)JointID::HipR].desired_angle  = approach(joints[(size_t)JointID::HipR].desired_angle,  hr);
+    joints[(size_t)JointID::KneeR].desired_angle = approach(joints[(size_t)JointID::KneeR].desired_angle, kr);
+
+    DebugDraw::get().point(left_step_goal,  4.f, 0x00FF00FF); // green = left
+    DebugDraw::get().point(right_step_goal, 4.f, 0xFF0000FF); // red   = right
 }
 
 std::optional<glm::vec2> PlayerCharacter::select_next_step(PhysicsEngine& pe, bool right){
 
     float step_offset = right ? 5.0f : 0.0f;
     // TODO: make constant
-    glm::vec2 origin = position(pe) + glm::vec2( step_offset + (velocity(pe).x / max_speed + glm::sign(velocity(pe).x) *0.1f) * 50.0f, 0.0f );
+    glm::vec2 origin = position(pe) + glm::vec2( step_offset + (velocity(pe).x / max_speed + glm::sign(velocity(pe).x) *0.1f) * step_length_test, 0.0f );
 
     //TODO: max dist needs to be constant too
     std::optional<RaycastHit> step_point = pe.raycast(origin, glm::vec2(0.0, 1.0), 80.0f, PLAYER_MASK);

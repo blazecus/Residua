@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "scenes.h"
+#include "debug_draw.h"
 #include "imgui.h"
 #include <src/physics/physics_engine.h>
 #include <src/renderer/residua_engine.h>
@@ -52,4 +53,17 @@ void UIManager::draw() {
         physics->cap_sdf_floats * 4 / 1024);
 
     ImGui::End();
+
+    PlayerCharacter& player = scenes->player;
+    if (player.is_valid()) {
+        ImGui::Begin("Player");
+        ImGui::SliderFloat("Step time",       &player.step_time,          0.05f, 1.f);
+        ImGui::SliderFloat("Step length",     &player.step_length_test,   0.f,   200.f);
+        ImGui::SliderFloat("Leg angle speed", &player.max_leg_angle_speed, 1.f,  50.f);
+        ImGui::End();
+    }
+
+    float sx = float(engine->_windowExtent.width)  / float(PHYSICS_WIDTH);
+    float sy = float(engine->_windowExtent.height) / float(PHYSICS_HEIGHT);
+    DebugDraw::get().render(sx, sy);
 }
