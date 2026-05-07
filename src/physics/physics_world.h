@@ -26,7 +26,7 @@ struct PhysicsStats {
 };
 
 struct PhysicsWorld {
-    float gravity   { 100.f };
+    float gravity   { 200.f };
     float alpha     { AVBD_ALPHA };
     float beta      { AVBD_BETA  };
     float gamma     { AVBD_GAMMA };

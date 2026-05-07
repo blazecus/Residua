@@ -204,9 +204,6 @@ void ResiduaEngine::process_renderer_input(SDL_Event& e) {
     ImGui_ImplSDL2_ProcessEvent(&e);
 }
 
-void ResiduaEngine::process_player_update(glm::vec2 player_pos) {
-}
-
 void ResiduaEngine::draw_frame() {
     auto start = std::chrono::system_clock::now();
 

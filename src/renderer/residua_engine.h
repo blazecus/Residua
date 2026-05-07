@@ -143,8 +143,6 @@ public:
 
     void process_renderer_input(SDL_Event& e);
 
-    void process_player_update(glm::vec2 position);
-
     void draw_frame();
 
 private:

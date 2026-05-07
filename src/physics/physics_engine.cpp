@@ -169,7 +169,7 @@ void PhysicsEngine::init(ResiduaEngine* engine)
         b.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // sdf_data_buf
         pl.desc_layout = b.build(device, VK_SHADER_STAGE_COMPUTE_BIT);
 
-        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
+        VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) * 2 };
         VkPipelineLayoutCreateInfo li {
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount         = 1,
@@ -339,7 +339,9 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
     const uint32_t h = body.sprite.height;
     const uint32_t n = w * h;
 
-    const uint32_t pixel_offset = next_pixel;
+    const uint32_t pixel_offset         = next_pixel;
+    next_pixel += n;
+    const uint32_t flipped_pixel_offset = next_pixel;
     next_pixel += n;
 
     const uint32_t sdf_size   = body.sdf_w * body.sdf_h;
@@ -357,7 +359,7 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
     const uint32_t edge_count  = (uint32_t)body.shape.size();
     next_vert += edge_count;
 
-    body_draw_info[slot] = { pixel_offset, w, h, sdf_offset, edge_offset, edge_count };
+    body_draw_info[slot] = { pixel_offset, flipped_pixel_offset, w, h, sdf_offset, edge_offset, edge_count };
 
     // Upload local-space polygon vertices for this body.
     auto* vert_dst = static_cast<glm::vec2*>(body_verts_buf.info.pMappedData);
@@ -365,6 +367,10 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
 
     auto* px_dst = static_cast<glm::vec4*>(pixel_colors_buf.info.pMappedData);
     std::memcpy(px_dst + pixel_offset, body.sprite.pixels.data(), n * sizeof(glm::vec4));
+
+    // Upload pre-flipped copy for horizontal mirror rendering
+    LoadedBodyImage flipped = flip_horizontal(body.sprite);
+    std::memcpy(px_dst + flipped_pixel_offset, flipped.pixels.data(), n * sizeof(glm::vec4));
 
     auto* sdf_dst = static_cast<float*>(sdf_data_buf.info.pMappedData);
     std::memcpy(sdf_dst + sdf_offset, body.sdf.data(), sdf_size * sizeof(float));
@@ -393,7 +399,7 @@ uint32_t PhysicsEngine::add_static_rect(ResiduaEngine* engine, glm::vec2 center,
     std::memcpy(static_cast<glm::vec2*>(body_verts_buf.info.pMappedData) + edge_offset,
                 body.shape.data(), edge_count * sizeof(glm::vec2));
 
-    body_draw_info[slot] = { 0, 0, 0, sdf_offset, edge_offset, edge_count };
+    body_draw_info[slot] = { 0, 0, 0, 0, sdf_offset, edge_offset, edge_count };
 
     return slot;
 }
@@ -449,9 +455,51 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
     run_coloring();
     run_manifold_gen();
     world.solve(dt);
-    uint32_t active_count = upload_draw_data();
-    if (active_count == 0) return;
-    run_draw(cmd, active_count);
+    upload_draw_data();
+
+    uint32_t total = 0;
+    for (uint32_t l = 0; l < MAX_DRAW_LAYERS; l++) total += layer_counts[l];
+    if (total == 0) return;
+
+    // Clear output image once
+    VkImageSubresourceRange full_range {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1,
+    };
+    VkClearColorValue clear_color{};
+    vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL,
+                         &clear_color, 1, &full_range);
+
+    VkImageMemoryBarrier2 clear_barrier {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .image         = output_screen.image,
+        .subresourceRange = full_range,
+    };
+    VkDependencyInfo dep_clear {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &clear_barrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dep_clear);
+
+    // Draw each layer in order
+    for (uint32_t l = 0; l < MAX_DRAW_LAYERS; l++) {
+        if (layer_counts[l] == 0) continue;
+        run_draw(cmd, layer_counts[l], layer_offsets[l]);
+    }
+
+    // Gap fill
+    struct { uint32_t width; uint32_t height; } gap_pc { PHYSICS_WIDTH, PHYSICS_HEIGHT };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gap_fill_pl.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+        gap_fill_pl.layout, 0, 1, &gap_fill_desc, 0, nullptr);
+    vkCmdPushConstants(cmd, gap_fill_pl.layout,
+        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gap_pc), &gap_pc);
+    vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
 }
 
 void PhysicsEngine::run_coloring()
@@ -652,11 +700,29 @@ void PhysicsEngine::run_manifold_gen()
     world.stats.gpu_sdf_floats = next_sdf_float;
 }
 
-uint32_t PhysicsEngine::upload_draw_data()
+void PhysicsEngine::upload_draw_data()
 {
     auto* rb_ptr     = static_cast<RigidBodyDrawGPU*>(rb_draw_buf.info.pMappedData);
     auto* active_ptr = static_cast<uint32_t*>(active_indices_buf.info.pMappedData);
-    uint32_t active_count = 0;
+
+    std::fill(layer_counts, layer_counts + MAX_DRAW_LAYERS, 0u);
+
+    for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
+        if (!world.active[i]) continue;
+        if (!world.bodies[i].visible) continue;
+        if (i >= (uint32_t)body_draw_info.size()) continue;
+        const BodyGPUInfo& bdi = body_draw_info[i];
+        if (bdi.body_w == 0 || bdi.body_h == 0) continue;
+
+        uint32_t layer = std::min(world.bodies[i].draw_layer, MAX_DRAW_LAYERS - 1u);
+        layer_counts[layer]++;
+    }
+
+    layer_offsets[0] = 0;
+    for (uint32_t l = 1; l < MAX_DRAW_LAYERS; l++)
+        layer_offsets[l] = layer_offsets[l - 1] + layer_counts[l - 1];
+
+    uint32_t per_layer[MAX_DRAW_LAYERS]{};
 
     for (uint32_t i = 0; i < (uint32_t)world.bodies.size(); i++) {
         if (!world.active[i]) continue;
@@ -673,55 +739,33 @@ uint32_t PhysicsEngine::upload_draw_data()
         draw.velocity         = glm::vec2(rb.velocity);
         draw.angular_velocity = rb.velocity.z;
         draw.I_com            = rb.inertia;
-        draw.pixel_index      = bdi.pixel_index;
+        draw.pixel_index      = rb.flip_h ? bdi.flipped_pixel_index : bdi.pixel_index;
         draw.body_w           = bdi.body_w;
         draw.body_h           = bdi.body_h;
         draw.sdf_offset       = bdi.sdf_offset;
-        draw.com_local        = rb.com_local;
+        draw.com_local        = rb.flip_h ? glm::vec2(-rb.com_local.x, rb.com_local.y) : rb.com_local;
+        draw.flip_h           = rb.flip_h ? 1u : 0u;
         rb_ptr[i] = draw;
-        active_ptr[active_count++] = i;
-    }
 
-    return active_count;
+        uint32_t layer = std::min(rb.draw_layer, MAX_DRAW_LAYERS - 1u);
+        active_ptr[layer_offsets[layer] + per_layer[layer]++] = i;
+    }
 }
 
-void PhysicsEngine::run_draw(VkCommandBuffer cmd, uint32_t active_count)
+void PhysicsEngine::run_draw(VkCommandBuffer cmd, uint32_t count, uint32_t offset)
 {
-    VkImageSubresourceRange full_range {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .levelCount = 1,
-        .layerCount = 1,
-    };
-
-    VkClearColorValue clear_color{};
-    vkCmdClearColorImage(cmd, output_screen.image, VK_IMAGE_LAYOUT_GENERAL,
-                         &clear_color, 1, &full_range);
-
-    VkImageMemoryBarrier2 img_clear_barrier {
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask     = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask    = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
-        .image            = output_screen.image,
-        .subresourceRange = full_range,
-    };
-    VkDependencyInfo dep1 {
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &img_clear_barrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dep1);
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, draw_pl.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         draw_pl.layout, 0, 1, &draw_desc, 0, nullptr);
+    struct { uint32_t body_count; uint32_t index_offset; } pc { count, offset };
     vkCmdPushConstants(cmd, draw_pl.layout,
-        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &active_count);
-    vkCmdDispatch(cmd, active_count, 1, 1);
+        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, count, 1, 1);
 
+    // Barrier so next layer (or gap fill) sees this layer's writes
+    VkImageSubresourceRange full_range {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1,
+    };
     VkImageMemoryBarrier2 img_draw_barrier {
         .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -739,14 +783,6 @@ void PhysicsEngine::run_draw(VkCommandBuffer cmd, uint32_t active_count)
         .pImageMemoryBarriers    = &img_draw_barrier,
     };
     vkCmdPipelineBarrier2(cmd, &dep2);
-
-    struct { uint32_t width; uint32_t height; } gap_pc { PHYSICS_WIDTH, PHYSICS_HEIGHT };
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gap_fill_pl.pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-        gap_fill_pl.layout, 0, 1, &gap_fill_desc, 0, nullptr);
-    vkCmdPushConstants(cmd, gap_fill_pl.layout,
-        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gap_pc), &gap_pc);
-    vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
 }
 
 PhysicsStats PhysicsEngine::get_stats(){

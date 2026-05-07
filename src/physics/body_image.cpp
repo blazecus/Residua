@@ -22,3 +22,14 @@ LoadedBodyImage load_body_image(const char* path) {
     stbi_image_free(data);
     return result;
 }
+
+LoadedBodyImage flip_horizontal(const LoadedBodyImage& img) {
+    LoadedBodyImage result;
+    result.width  = img.width;
+    result.height = img.height;
+    result.pixels.resize(img.pixels.size());
+    for (uint32_t y = 0; y < img.height; y++)
+        for (uint32_t x = 0; x < img.width; x++)
+            result.pixels[y * img.width + x] = img.pixels[y * img.width + (img.width - 1 - x)];
+    return result;
+}

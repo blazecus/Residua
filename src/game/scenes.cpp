@@ -24,6 +24,16 @@ void SceneManager::clear() {
     current_scene = -1;
 }
 
+void SceneManager::apply_inputs(const InputManager::Inputs& inputs, glm::vec2 aim_pos)
+{
+    player.apply_inputs(
+        inputs.flou(InputManager::RIGHT) - inputs.flou(InputManager::LEFT),
+        inputs.blou(InputManager::CROUCH),
+        inputs.blou(InputManager::JUMP),
+        aim_pos
+    );
+}
+
 void SceneManager::update(float dt) {
     player.update(*physics, dt);
 }

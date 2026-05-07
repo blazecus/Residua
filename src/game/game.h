@@ -23,8 +23,6 @@ public:
     bool freeze_rendering{ false };
     bool fpsLimit = true;
 
-    glm::vec2 temp_player_position = glm::vec2(0.0f);
-
     uint16_t fps = 60;
     float delta = 1.0f / fps;
     std::chrono::microseconds frameTime{ 1000000 / fps };

@@ -16,7 +16,8 @@ struct RigidBodyDraw {
     uint  body_h;
     uint  sdf_offset;
     vec2  com_local;         // COM offset from image center (pixel units)
-    vec2  _pad;
+    uint  flip_h;
+    uint  _pad;
 };
 
 layout(set = 0, binding = 0) readonly buffer RigidBodyDrawBuffer {
@@ -39,11 +40,12 @@ layout(std430, set = 0, binding = 4) readonly buffer SDFBuffer {
 
 layout(push_constant) uniform PushConstants {
     uint body_count;
+    uint index_offset;
 };
 
 void main() {
     if (gl_WorkGroupID.x >= body_count) return;
-    uint body_idx = active_indices[gl_WorkGroupID.x];
+    uint body_idx = active_indices[index_offset + gl_WorkGroupID.x];
 
     RigidBodyDraw body = bodies[body_idx];
 
@@ -74,9 +76,10 @@ void main() {
         if (color.a <= 0.0) continue;
 
         const uint SDF_SCALE = 2;
-        uint sdf_w = body.body_w * SDF_SCALE;
-        uint sdf_x = lx * SDF_SCALE;
-        uint sdf_y = ly * SDF_SCALE;
+        uint sdf_w  = body.body_w * SDF_SCALE;
+        uint sdf_lx = (body.flip_h != 0u) ? (body.body_w - 1u - lx) : lx;
+        uint sdf_x  = sdf_lx * SDF_SCALE;
+        uint sdf_y  = ly * SDF_SCALE;
         float sdf_val = sdf_data[body.sdf_offset + sdf_y * sdf_w + sdf_x];
         float t = clamp(-sdf_val / 5.0, 0.0, 1.0);
         color.rgb = mix(vec3(1.0), vec3(0.1, 0.4, 1.0), t);

@@ -26,8 +26,8 @@ struct RaycastHit {
 
 static constexpr uint32_t COLLISION_MASK_ALL = 0xFFFFFFFFu;
 
-static constexpr uint32_t PHYSICS_WIDTH    = 480;
-static constexpr uint32_t PHYSICS_HEIGHT   = 270;
+static constexpr uint32_t PHYSICS_WIDTH    = 640;
+static constexpr uint32_t PHYSICS_HEIGHT   = 360;
 static constexpr uint32_t MAX_GPU_CONTACTS = 16384;
 static constexpr uint32_t MAX_GPU_BODIES   = 4096;
 static constexpr uint32_t MAX_GPU_VERTS    = 65536;
@@ -35,6 +35,7 @@ static constexpr uint32_t MAX_GPU_PAIRS    = 16384;
 static constexpr uint32_t MAX_COLOR_BODIES = 4096;
 static constexpr uint32_t MAX_COLOR_ADJ    = 65536;
 static constexpr uint32_t COLOR_JP_ITERS   = 16;
+static constexpr uint32_t MAX_DRAW_LAYERS  = 4;
 
 struct GPUBodyInfo {
     glm::vec2 pos;           
@@ -75,7 +76,8 @@ struct RigidBodyDrawGPU {
     uint32_t  body_h;
     uint32_t  sdf_offset{0};
     glm::vec2 com_local;
-    glm::vec2 _pad{0.f};
+    uint32_t  flip_h{0u};
+    uint32_t  _pad{0u};
 };
 static_assert(sizeof(RigidBodyDrawGPU) == 64);
 
@@ -100,11 +102,12 @@ public:
 
     struct BodyGPUInfo {
         uint32_t pixel_index{0};
+        uint32_t flipped_pixel_index{0};
         uint32_t body_w{0};
         uint32_t body_h{0};
         uint32_t sdf_offset{0};
         uint32_t edge_offset{0};
-        uint32_t edge_count{0};  
+        uint32_t edge_count{0};
     };
     std::vector<BodyGPUInfo> body_draw_info;
     uint32_t next_pixel{0};
@@ -135,6 +138,9 @@ public:
 
     ResiduaEngine* engine_ref{nullptr};
 
+    uint32_t layer_offsets[MAX_DRAW_LAYERS]{};
+    uint32_t layer_counts [MAX_DRAW_LAYERS]{};
+
     void init(ResiduaEngine* engine);
 
 private:
@@ -143,8 +149,8 @@ private:
 
     void     run_coloring();
     void     run_manifold_gen();
-    uint32_t upload_draw_data();
-    void     run_draw(VkCommandBuffer cmd, uint32_t active_count);
+    void     upload_draw_data();
+    void     run_draw(VkCommandBuffer cmd, uint32_t count, uint32_t offset);
 
 public:
     uint32_t add_body(ResiduaEngine* engine, RigidBody body);

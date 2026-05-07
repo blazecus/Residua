@@ -10,3 +10,4 @@ struct LoadedBodyImage {
 };
 
 LoadedBodyImage load_body_image(const char* path);
+LoadedBodyImage flip_horizontal(const LoadedBodyImage& img);

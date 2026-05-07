@@ -3,6 +3,7 @@
 #include <src/physics/physics_engine.h>
 #include <src/physics/body_image.h>
 #include <src/game/player/player_character.h>
+#include <src/game/input_manager.h>
 #include <string>
 
 class ResiduaEngine;
@@ -37,6 +38,7 @@ struct SceneManager {
 
     void clear();
     void load(int idx);
+    void apply_inputs(const InputManager::Inputs& inputs, glm::vec2 aim_pos);
     void update(float dt);
 
     uint32_t spawn_body(const LoadedBodyImage& img, glm::vec2 world_pos);

@@ -24,7 +24,7 @@ void Game::init() {
     engine.init(_windowExtent, _window);
 
     ball_image = load_body_image("../assets/physics/ball.png");
-    cshape     = load_body_image("../assets/physics/cshape.png");
+    cshape     = load_body_image("../assets/physics/slope.png");
     star       = load_body_image("../assets/physics/boom.png");
 
     physics_engine.init(&engine);
@@ -34,7 +34,7 @@ void Game::init() {
     ui_manager.init(&scene_manager, &physics_engine, &engine);
     engine.ui_callback = [this]() { ui_manager.draw(); };
 
-    scene_manager.load(0);
+    scene_manager.load(3);
 
     lastFrame = std::chrono::system_clock::now();
 }
@@ -108,27 +108,18 @@ void Game::run() {
         }
 
         auto input = client.inputManager.getInputs();
-        glm::vec2 diff = glm::vec2(
-            input.flou(InputManager::InputType::RIGHT) - input.flou(InputManager::InputType::LEFT),
-            input.flou(InputManager::InputType::BACKWARD) - input.flou(InputManager::InputType::FORWARD)
-        ) * 200.0f * delta;
-        temp_player_position += diff;
-        engine.process_player_update(temp_player_position);
 
         DebugDraw::get().clear();
         client.update();
-        scene_manager.player.move_dir =
-            input.flou(InputManager::InputType::RIGHT) -
-            input.flou(InputManager::InputType::LEFT);
-        scene_manager.player.walking = input.blou(InputManager::InputType::CROUCH);
+        scene_manager.apply_inputs(input, physics_mouse());
         scene_manager.update(delta);
 
         if (input.blou(InputManager::InputType::FORWARD)) {
             scene_manager.spawn_body(ball_image, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 5) {
-            scene_manager.spawn_body(cshape, physics_mouse());
-            lastSpawn = 0;
+            // scene_manager.spawn_body(cshape, physics_mouse());
+            // lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 10) {
             // scene_manager.spawn_body(star, physics_mouse());
             // lastSpawn = 0;
