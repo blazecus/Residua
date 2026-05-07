@@ -250,6 +250,8 @@ void PlayerCharacter::update(PhysicsEngine& pe, float dt)
 
 void PlayerCharacter::animate(PhysicsEngine& pe, float dt)
 {
+    if (!is_valid()) return;
+
     glm::vec2 air_normal = glm::normalize(glm::vec2(facing_dir * AIR_NORMAL_TILT, -1.0f));
 
     // fix feet on landing
