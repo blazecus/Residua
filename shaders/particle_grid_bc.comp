@@ -1,0 +1,115 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PC {
+    uvec2 grid_size;
+    uint  fixed_point_mult;
+    float gravity_impulse;  
+    float dt;               
+    uint  cell_size;        
+    uint  _pad;
+} pc;
+
+layout(std430, set=0, binding=0) buffer Grid {
+    int grid_data[];
+};
+
+// velocity_image: written by rigidbody_draw.comp
+layout(rgba16f, set=0, binding=1) uniform readonly image2D vel_image;
+
+int   encode_fp(float v) { return int(v * float(pc.fixed_point_mult)); }
+float decode_fp(int   v) { return float(v) / float(pc.fixed_point_mult); }
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.grid_size.x * pc.grid_size.y) return;
+
+    int  cx = int(idx % pc.grid_size.x);
+    int  cy = int(idx / pc.grid_size.x);
+    uint gi  = idx * 4u;
+
+    int   cs = int(pc.cell_size);
+
+    bool solid = false;
+    vec2 sv    = vec2(0.0);
+    ivec2 base = ivec2(cx, cy) * cs;
+    for (int dy = 0; dy < cs && !solid; dy++) {
+        for (int dx = 0; dx < cs && !solid; dx++) {
+            vec4 s = imageLoad(vel_image, base + ivec2(dx, dy));
+            if (s.a >= 0.5) { solid = true; sv = s.rg; }
+        }
+    }
+
+    // OOB neighbors are treated as solid walls (v = 0) — they are hard boundaries.
+    // change later
+    vec2 out_n = vec2(0.0);
+    const ivec2 dirs[4] = ivec2[4](ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1));
+    for (int d = 0; d < 4; d++) {
+        ivec2 nc = ivec2(cx, cy) + dirs[d];
+        bool oob = nc.x < 0 || nc.y < 0 ||
+                   nc.x >= int(pc.grid_size.x) || nc.y >= int(pc.grid_size.y);
+        bool nb_solid;
+        vec2  nb_vel;
+        if (oob) {
+            nb_solid = true;
+            nb_vel   = vec2(0.0);
+        } else {
+            // Same block scan for neighbor nodes.
+            nb_solid = false; nb_vel = vec2(0.0);
+            ivec2 nb = nc * cs;
+            for (int dy = 0; dy < cs && !nb_solid; dy++) {
+                for (int dx = 0; dx < cs && !nb_solid; dx++) {
+                    vec4 s = imageLoad(vel_image, nb + ivec2(dx, dy));
+                    if (s.a >= 0.5) { nb_solid = true; nb_vel = s.rg; }
+                }
+            }
+        }
+        if (nb_solid) {
+            if (!solid) { solid = true; sv = nb_vel; }  // dilate
+        } else {
+            out_n += vec2(dirs[d]);   // non-solid neighbor → outward direction
+        }
+    }
+
+    if (!solid) {
+        // Pure fluid node: apply gravity to existing momentum.
+        float gm = decode_fp(grid_data[gi + 2]);
+        if (gm > 1e-5)
+            grid_data[gi + 1] += encode_fp(gm * pc.gravity_impulse);
+        return;
+    }
+
+    vec2  rb_vel = sv * pc.dt;
+    float nlen   = length(out_n);
+    float gm     = decode_fp(grid_data[gi + 2]);
+
+    if (nlen < 0.1) {
+        grid_data[gi + 0] = encode_fp(rb_vel.x);
+        grid_data[gi + 1] = encode_fp(rb_vel.y);
+        grid_data[gi + 2] = encode_fp(1.0);
+        return;
+    }
+
+    vec2 n_hat = out_n / nlen;  
+
+    if (gm < 1e-5) {
+        grid_data[gi + 0] = encode_fp(rb_vel.x);
+        grid_data[gi + 1] = encode_fp(rb_vel.y);
+        grid_data[gi + 2] = encode_fp(1.0);
+        return;
+    }
+
+    // tangential preserved motion
+    grid_data[gi + 1] += encode_fp(gm * pc.gravity_impulse);
+
+    vec2 fluid_vel = vec2(decode_fp(grid_data[gi + 0]),
+                          decode_fp(grid_data[gi + 1])) / gm;
+
+    float pen = -dot(fluid_vel - rb_vel, n_hat);
+    if (pen > 0.0) {
+        vec2 new_vel = fluid_vel + pen * n_hat;
+        grid_data[gi + 0] = encode_fp(new_vel.x * gm);
+        grid_data[gi + 1] = encode_fp(new_vel.y * gm);
+    }
+}

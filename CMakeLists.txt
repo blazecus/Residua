@@ -26,6 +26,8 @@ add_executable (Residua
   src/game/debug_draw.h
   src/game/client.cpp
   src/game/client.h
+  src/game/settings.cpp
+  src/game/settings.h
   src/renderer/residua_engine.cpp
   src/renderer/residua_engine.h
   src/renderer/vk_types.h
@@ -60,6 +62,8 @@ add_executable (Residua
   src/physics/spring.h
   src/physics/physics_engine.cpp
   src/physics/physics_engine.h
+  src/physics/particle_sim.cpp
+  src/physics/particle_sim.h
   src/physics/physics_api.cpp
   src/game/player/player_character.h
   src/game/player/player_character.cpp

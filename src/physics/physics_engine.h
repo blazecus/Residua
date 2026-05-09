@@ -1,6 +1,7 @@
 #pragma once
 
 #include "physics_world.h"
+#include "particle_sim.h"
 #include "../renderer/vk_types.h"
 #include "../renderer/vk_descriptors.h"
 #include <optional>
@@ -84,8 +85,10 @@ static_assert(sizeof(RigidBodyDrawGPU) == 64);
 class PhysicsEngine {
 public:
     PhysicsWorld world;
+    ParticleSim  particle_sim;
 
     AllocatedImage  output_screen;
+    AllocatedImage  velocity_image; 
     AllocatedBuffer rb_draw_buf;
     AllocatedBuffer pixel_colors_buf;
     AllocatedBuffer active_indices_buf;

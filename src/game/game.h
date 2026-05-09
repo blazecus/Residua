@@ -2,6 +2,7 @@
 
 #include <src/game/client.h>
 #include <src/game/scenes.h>
+#include <src/game/settings.h>
 #include <src/game/ui.h>
 #include <src/renderer/residua_engine.h>
 #include <src/physics/physics_engine.h>
@@ -12,7 +13,7 @@
 class Game {
 public:
 
-    VkExtent2D _windowExtent { 1700, 900 };
+    GameSettings settings;
     struct SDL_Window* _window { nullptr };
 
     SDL_Cursor* cursor;

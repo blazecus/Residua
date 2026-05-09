@@ -1,0 +1,316 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const int MAT_LIQUID  = 0;
+const int MAT_ELASTIC = 1;
+const int MAT_SAND    = 2;
+const int MAT_VISCO   = 3;
+
+const float PI          = 3.14159265359;
+const int   GUARDIAN    = 3;
+
+layout(push_constant) uniform PC {
+    uvec2    grid_size;
+    uint     particle_count;
+    uint     iteration;
+    uint     iteration_count;
+    float    delta_time;
+    float    gravity;
+    float    border_friction;
+    float    liquid_relaxation;
+    float    liquid_viscosity;
+    float    elastic_relaxation;
+    float    elasticity_ratio;
+    float    friction_angle;
+    float    plasticity;
+    uint     fixed_point_mult;
+    uint     cell_size;
+} pc;
+
+struct Particle {
+    vec2  position;
+    vec2  displacement;
+    mat2  deformation_gradient;
+    mat2  deformation_displacement;
+    float liquid_density;
+    float mass;
+    float material;
+    float volume;
+    float log_jp;
+    float enabled;
+    vec2  _pad;
+    vec4  color;
+};
+
+layout(std430, set=0, binding=0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+// grid_src: read-only momentum grid from previous iteration
+layout(std430, set=0, binding=1) readonly buffer GridSrc {
+    int grid_src[];
+};
+
+// grid_dst: atomic accumulation target for this iteration
+layout(std430, set=0, binding=2) coherent buffer GridDst {
+    int grid_dst[];
+};
+
+// vel_image: .rg = solid velocity (px/s), .b = SDF value (negative = inside solid), .a = solid flag
+layout(rgba16f, set=1, binding=0) uniform readonly image2D vel_image;
+
+int   encode_fp(float v)  { return int(v * float(pc.fixed_point_mult)); }
+float decode_fp(int   v)  { return float(v) / float(pc.fixed_point_mult); }
+
+uint grid_idx(ivec2 cell) {
+    return uint(4 * (cell.y * int(pc.grid_size.x) + cell.x));
+}
+
+struct WeightInfo {
+    vec2  w[3];       // weights along each axis for the 3 stencil cells
+    ivec2 base;       // lower-left cell of the 3×3 stencil
+};
+
+WeightInfo quad_weights(vec2 pos) {
+    vec2 fp  = floor(pos);
+    vec2 off = (pos - fp) - 0.5;
+    WeightInfo wi;
+    wi.w[0] = 0.5 * (0.5 - off) * (0.5 - off);
+    wi.w[1] = 0.75 - off * off;
+    wi.w[2] = 0.5 * (0.5 + off) * (0.5 + off);
+    wi.base = ivec2(fp) - 1;
+    return wi;
+}
+
+bool in_grid(ivec2 cell) {
+    return all(greaterThanEqual(cell, ivec2(0))) &&
+           all(lessThan(cell, ivec2(pc.grid_size)));
+}
+
+vec2 project_guardian(vec2 p) {
+    float cs = float(pc.cell_size);
+    vec2 lo = vec2(GUARDIAN) * cs;
+    vec2 hi = vec2(pc.grid_size) * cs - vec2(GUARDIAN) * cs - vec2(1.0);
+    return clamp(p, lo, hi);
+}
+
+float tr2(mat2 m)       { return m[0][0] + m[1][1]; }
+mat2  diag2(vec2 d)     { return mat2(d.x, 0.0, 0.0, d.y); }
+
+struct SVD2 { mat2 U; vec2 Sigma; mat2 Vt; };
+
+SVD2 svd2(mat2 A) {
+    float s00 = A[0][0]*A[0][0] + A[1][0]*A[1][0];
+    float s01 = A[0][0]*A[0][1] + A[1][0]*A[1][1];
+    float s11 = A[0][1]*A[0][1] + A[1][1]*A[1][1];
+
+    float th   = 0.5 * (s00 + s11);
+    float det  = s00*s11 - s01*s01;
+    float disc = sqrt(max(th*th - det, 0.0));
+
+    vec2 sigma = sqrt(max(vec2(th + disc, th - disc), vec2(0.0)));
+
+    vec2 v0 = (abs(s01) > 1e-10)
+        ? normalize(vec2(sigma.x*sigma.x - s11, s01))
+        : (s00 >= s11 ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    vec2 v1 = vec2(-v0.y, v0.x);
+
+    mat2 V = mat2(v0, v1);  
+
+    vec2 Av0 = A * v0;
+    vec2 Av1 = A * v1;
+
+    mat2 U;
+    U[0] = (sigma.x > 1e-10) ? Av0 / sigma.x : v0;
+    U[1] = (sigma.y > 1e-10) ? Av1 / sigma.y : v1;
+
+    if (determinant(U) < 0.0) {
+        U[1]    = -U[1];
+        sigma.y = -sigma.y;
+    }
+
+    SVD2 r; r.U = U; r.Sigma = sigma; r.Vt = transpose(V);
+    return r;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.particle_count) return;
+
+    Particle p = particles[idx];
+    if (p.enabled < 0.5) return;
+
+    // Particle positions are in pixel space; convert to cell space for the grid.
+    float      cs  = float(pc.cell_size);
+    vec2       cp  = p.position / cs;   
+    WeightInfo wi  = quad_weights(cp);
+    int        mat = int(p.material + 0.5);
+
+    // ── G2P: gather velocity from last iteration's grid ───────────────────────
+    // Skipped on iteration 0 – the grid is empty; the particle's existing
+    // displacement (from the previous frame) seeds the first P2G pass.
+
+    if (pc.iteration > 0u) {
+        mat2  B      = mat2(0.0);
+        vec2  d      = vec2(0.0);
+        float volume = 0.0;
+
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                ivec2 cell = wi.base + ivec2(i, j);
+                if (!in_grid(cell)) continue;
+
+                uint  gi = grid_idx(cell);
+                float gm = decode_fp(grid_src[gi + 2]);
+
+                float  w   = wi.w[i].x * wi.w[j].y;
+                volume += w * decode_fp(grid_src[gi + 3]);
+
+                if (gm < 1e-5) continue;
+
+                // Decode momentum and divide by mass to get grid velocity.
+                vec2 gv = vec2(decode_fp(grid_src[gi + 0]),
+                               decode_fp(grid_src[gi + 1])) / gm;
+
+                vec2   off = vec2(cell) - cp + 0.5;
+                B += outerProduct(w * gv, off);
+                d += w * gv;
+            }
+        }
+
+        p.deformation_displacement = B * 4.0;
+        p.displacement             = d;
+
+        // Grid volume correction for liquid: mix liquid_density toward the
+        // grid-estimated volume when compressed. Only corrects in compression
+        // (grid_vol < 1) because tension behaviour differs between approaches.
+        if (mat == MAT_LIQUID && volume > 1e-5) {
+            p.liquid_density = mix(p.liquid_density, 1.0 / volume, 0.1);
+        }
+
+        // ── Integrate on the final iteration ─────────────────────────────────
+        if (pc.iteration == pc.iteration_count - 1u) {
+            if (mat == MAT_LIQUID) {
+                p.liquid_density *= (tr2(p.deformation_displacement) + 1.0);
+                p.liquid_density  = max(p.liquid_density, 0.05);
+            } else {
+                p.deformation_gradient =
+                    (mat2(1.0) + p.deformation_displacement) * p.deformation_gradient;
+
+                SVD2 svd = svd2(p.deformation_gradient);
+                svd.Sigma = clamp(svd.Sigma, vec2(0.1), vec2(10000.0));
+
+                if (mat == MAT_SAND) {
+                    float sinPhi = sin(pc.friction_angle / 180.0 * PI);
+                    float alpha  = sqrt(2.0/3.0) * 2.0*sinPhi / (3.0 - sinPhi);
+
+                    vec2  eDiag = log(max(abs(svd.Sigma), vec2(1e-6)));
+                    float trace = eDiag.x + eDiag.y + p.log_jp;
+                    vec2  eHat  = eDiag - vec2(trace * 0.5);
+                    float frob  = length(eHat);
+
+                    if (trace >= 0.0) {
+                        svd.Sigma = vec2(1.0);
+                        p.log_jp  = 0.5 * trace;
+                    } else {
+                        p.log_jp = 0.0;
+                        float dg = frob + (pc.elasticity_ratio + 1.0) * trace * alpha;
+                        if (dg > 0.0)
+                            svd.Sigma = exp(eDiag - (dg/frob) * (eDiag - vec2(trace*0.5)));
+                    }
+                } else if (mat == MAT_VISCO) {
+                    float ys  = exp(1.0 - pc.plasticity);
+                    float J   = svd.Sigma.x * svd.Sigma.y;
+                    svd.Sigma = clamp(svd.Sigma, vec2(1.0/ys), vec2(ys));
+                    float nJ  = svd.Sigma.x * svd.Sigma.y;
+                    svd.Sigma *= sqrt(J / nJ);
+                }
+
+                p.deformation_gradient = svd.U * diag2(svd.Sigma) * svd.Vt;
+            }
+
+            // Gravity is applied at the grid level in particle_grid_bc.comp,
+            p.position = project_guardian(p.position + p.displacement);
+
+            // ── Particle-level SDF push-out (matches pbmpm reference §particle collide) ─
+            // might have to change later
+            {
+                ivec2 pix = clamp(ivec2(floor(p.position)),
+                                  ivec2(0), ivec2(pc.grid_size) - ivec2(1));
+                float sv = imageLoad(vel_image, pix).b;
+                if (sv < 0.0) {
+                    float depth = -sv;
+                    ivec2 lo = max(pix - ivec2(1), ivec2(0));
+                    ivec2 hi = min(pix + ivec2(1), ivec2(pc.grid_size) - ivec2(1));
+                    float dx = imageLoad(vel_image, ivec2(hi.x, pix.y)).b
+                             - imageLoad(vel_image, ivec2(lo.x, pix.y)).b;
+                    float dy = imageLoad(vel_image, ivec2(pix.x, hi.y)).b
+                             - imageLoad(vel_image, ivec2(pix.x, lo.y)).b;
+                    float glen = length(vec2(dx, dy));
+                    if (glen > 1e-6) {
+                        vec2 world_normal = vec2(dx, dy) / glen;
+                        p.position += depth * world_normal;
+                    }
+                }
+            }
+        }
+
+        particles[idx] = p; 
+    }
+
+    if (mat == MAT_LIQUID) {
+        mat2  D   = p.deformation_displacement;
+        mat2  dev = -(D + transpose(D));
+        p.deformation_displacement += pc.liquid_viscosity * 0.5 * dev;
+        float al  = 0.5 * (1.0/p.liquid_density - tr2(p.deformation_displacement) - 1.0);
+        p.deformation_displacement += pc.liquid_relaxation * al * mat2(1.0);
+
+    } else if (mat == MAT_ELASTIC || mat == MAT_VISCO) {
+        mat2  F   = (mat2(1.0) + p.deformation_displacement) * p.deformation_gradient;
+        SVD2  svd = svd2(F);
+        float df  = determinant(F);
+        float cdf = clamp(abs(df), 0.1, 1000.0);
+        mat2  Q   = (1.0 / (sign(df) * sqrt(cdf))) * F;
+        float a   = pc.elasticity_ratio;
+        mat2  tgt = a * (svd.U * svd.Vt) + (1.0 - a) * Q;
+        mat2  dif = (tgt * inverse(p.deformation_gradient) - mat2(1.0))
+                    - p.deformation_displacement;
+        p.deformation_displacement += pc.elastic_relaxation * dif;
+
+    } else if (mat == MAT_SAND) {
+        mat2  F   = (mat2(1.0) + p.deformation_displacement) * p.deformation_gradient;
+        SVD2  svd = svd2(F);
+        if (p.log_jp == 0.0)
+            svd.Sigma = clamp(svd.Sigma, vec2(1.0), vec2(1000.0));
+        float df  = determinant(F);
+        float cdf = clamp(abs(df), 0.1, 1.0);
+        mat2  Q   = (1.0 / (sign(df) * sqrt(cdf))) * F;
+        float a   = pc.elasticity_ratio;
+        mat2  tgt = a * (svd.U * diag2(svd.Sigma) * svd.Vt) + (1.0 - a) * Q;
+        mat2  dif = (tgt * inverse(p.deformation_gradient) - mat2(1.0))
+                    - p.deformation_displacement;
+        p.deformation_displacement += pc.elastic_relaxation * dif;
+        mat2  D   = p.deformation_displacement;
+        p.deformation_displacement += pc.liquid_viscosity * 0.5 * -(D + transpose(D));
+    }
+
+    // ── P2G: scatter particle momentum to grid_dst ───────────────────────────
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            ivec2 cell = wi.base + ivec2(i, j);
+            if (!in_grid(cell)) continue;
+
+            uint  gi  = grid_idx(cell);
+            float w   = wi.w[i].x * wi.w[j].y;
+            vec2  off = vec2(cell) - cp + 0.5;
+            float wm  = w * p.mass;
+            vec2  mom = wm * (p.displacement + p.deformation_displacement * off);
+
+            atomicAdd(grid_dst[gi + 0], encode_fp(mom.x));
+            atomicAdd(grid_dst[gi + 1], encode_fp(mom.y));
+            atomicAdd(grid_dst[gi + 2], encode_fp(wm));
+            atomicAdd(grid_dst[gi + 3], encode_fp(p.volume * w));
+        }
+    }
+}

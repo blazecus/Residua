@@ -51,6 +51,7 @@ void UIManager::draw() {
     ImGui::Text("SDF:       %u / %u KB",
         s.gpu_sdf_floats * 4 / 1024,
         physics->cap_sdf_floats * 4 / 1024);
+    ImGui::Text("Particles: %u / %u", physics->particle_sim.particle_count(), MAX_PARTICLES);
 
     ImGui::End();
 

@@ -145,12 +145,12 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
     // render layers
     for (Limb l : { Limb::ThighR, Limb::LowerLegR, Limb::FootR,
                     Limb::UpperArmR, Limb::ForearmR, Limb::HandR })
-        pe.world.bodies[limbs[(size_t)l]].draw_layer = 0;
-    for (Limb l : { Limb::Torso, Limb::Head })
         pe.world.bodies[limbs[(size_t)l]].draw_layer = 1;
+    for (Limb l : { Limb::Torso, Limb::Head })
+        pe.world.bodies[limbs[(size_t)l]].draw_layer = 2;
     for (Limb l : { Limb::ThighL, Limb::LowerLegL, Limb::FootL,
                     Limb::UpperArmL, Limb::ForearmL, Limb::HandL })
-        pe.world.bodies[limbs[(size_t)l]].draw_layer = 2;
+        pe.world.bodies[limbs[(size_t)l]].draw_layer = 3;
 }
 
 void PlayerCharacter::despawn(PhysicsEngine& pe)

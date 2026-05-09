@@ -9,7 +9,7 @@ void Game::SDL_setup() {
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 
     _window = SDL_CreateWindow("Residua", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        _windowExtent.width, _windowExtent.height, window_flags);
+        settings.window_width, settings.window_height, window_flags);
 
     int32_t cursorData[2] = {0, 0};
     cursor = SDL_CreateCursor((Uint8*)cursorData, (Uint8*)cursorData, 8, 8, 4, 4);
@@ -21,7 +21,7 @@ void Game::init() {
 
     client.init();
 
-    engine.init(_windowExtent, _window);
+    engine.init({ settings.window_width, settings.window_height }, _window);
 
     ball_image = load_body_image("../assets/physics/ball.png");
     cshape     = load_body_image("../assets/physics/slope.png");
@@ -50,8 +50,8 @@ void Game::run() {
             int mx, my;
             SDL_GetMouseState(&mx, &my);
             return {
-                mx * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
-                my * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+                mx * float(PHYSICS_WIDTH)  / float(engine._windowExtent.width),
+                my * float(PHYSICS_HEIGHT) / float(engine._windowExtent.height)
             };
         };
 
@@ -68,8 +68,8 @@ void Game::run() {
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT
                     && !ImGui::GetIO().WantCaptureMouse) {
                 glm::vec2 mpos = {
-                    e.button.x * float(PHYSICS_WIDTH)  / float(_windowExtent.width),
-                    e.button.y * float(PHYSICS_HEIGHT) / float(_windowExtent.height)
+                    e.button.x * float(PHYSICS_WIDTH)  / float(engine._windowExtent.width),
+                    e.button.y * float(PHYSICS_HEIGHT) / float(engine._windowExtent.height)
                 };
                 if (auto hit = physics_engine.body_at(mpos)) {
                     auto& body = physics_engine.world.bodies[*hit];
@@ -113,6 +113,25 @@ void Game::run() {
         client.update();
         scene_manager.apply_inputs(input, physics_mouse());
         scene_manager.update(delta);
+
+        // Spawn a cluster of liquid particles each frame the right mouse button is held.
+        if (!ImGui::GetIO().WantCaptureMouse) {
+            int mx, my;
+            if (SDL_GetMouseState(&mx, &my) & SDL_BUTTON(SDL_BUTTON_RIGHT)) {
+                glm::vec2 centre = physics_mouse();
+                for (int i = -3; i <= 3; i++) {
+                    for (int j = -3; j <= 3; j++) {
+                        Particle p;
+                        p.position             = centre + glm::vec2(i, j);
+                        p.deformation_gradient = glm::mat2(1.f);
+                        p.color                = { 0.3f, 0.7f, 1.0f, 1.0f };
+                        p.liquid_density = 0.1f;
+                        p.volume = 1.0f;
+                        physics_engine.particle_sim.add_particle(p);
+                    }
+                }
+            }
+        }
 
         if (input.blou(InputManager::InputType::FORWARD)) {
             scene_manager.spawn_body(ball_image, physics_mouse());
