@@ -18,6 +18,7 @@ static constexpr SceneEntry SCENE_LIST[] = {
     { "Free Play",   "../assets/scenes/free_play.scene"    },
     { "Softbody",    "../assets/scenes/softbody.scene"     },
     { "Player Test", "../assets/scenes/player_test.scene"  },
+    { "Long Level",  "../assets/scenes/long_level.scene"   },
 };
 static constexpr int NUM_SCENES = sizeof(SCENE_LIST) / sizeof(SCENE_LIST[0]);
 
@@ -29,6 +30,10 @@ struct SceneManager {
     const LoadedBodyImage* star       { nullptr };
 
     int current_scene { -1 };
+
+    glm::vec2 camera_offset { 0.f, 0.f };
+    float     world_w       { 1e9f };
+    float     world_h       { 1e9f };
 
     PlayerCharacter player;
 

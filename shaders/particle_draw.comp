@@ -6,6 +6,7 @@ layout(push_constant) uniform PC {
     uvec2 grid_size;       // particle grid dims (physics_size / cell_size)
     uint  particle_count;
     uint  cell_size;
+    vec2  camera_offset;
 } pc;
 
 struct Particle {
@@ -36,7 +37,8 @@ void main() {
     Particle p = particles[idx];
     if (p.enabled < 0.5) return;
 
-    ivec2 pixel      = ivec2(p.position);
+    // screen space conversion
+    ivec2 pixel      = ivec2(p.position - pc.camera_offset);
     ivec2 pixel_size = ivec2(pc.grid_size) * int(pc.cell_size);
     if (any(lessThan(pixel, ivec2(0))) ||
         any(greaterThanEqual(pixel, pixel_size))) return;

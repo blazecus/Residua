@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <limits>
 #include <cmath>
+#include <algorithm>
 #include <fmt/core.h>
 
 void SceneManager::init(PhysicsEngine* phys, ResiduaEngine* eng,
@@ -36,6 +37,14 @@ void SceneManager::apply_inputs(const InputManager::Inputs& inputs, glm::vec2 ai
 
 void SceneManager::update(float dt) {
     player.update(*physics, dt);
+
+    if (player.is_valid()) {
+        glm::vec2 ppos = player.position(*physics);
+        float max_x = world_w - float(PHYSICS_WIDTH);
+        float max_y = world_h - float(PHYSICS_HEIGHT);
+        camera_offset.x = std::clamp(ppos.x - float(PHYSICS_WIDTH)  * 0.5f, 0.f, std::max(0.f, max_x));
+        camera_offset.y = std::clamp(ppos.y - float(PHYSICS_HEIGHT) * 0.5f, 0.f, std::max(0.f, max_y));
+    }
 }
 
 void SceneManager::load(int idx) {
@@ -112,6 +121,10 @@ void SceneManager::load_file(const std::string& path) {
         return;
     }
 
+    camera_offset = {0.f, 0.f};
+    world_w = 1e9f;
+    world_h = 1e9f;
+
     std::vector<uint32_t> body_idx;
     std::unordered_map<std::string, LoadedBodyImage> img_cache;
 
@@ -124,7 +137,12 @@ void SceneManager::load_file(const std::string& path) {
         std::string kw;
         if (!(ss >> kw)) continue;
 
-        if (kw == "player") {
+        if (kw == "world") {
+            auto f = parse_fields(ss);
+            world_w = getf(f, "w", float(PHYSICS_WIDTH));
+            world_h = getf(f, "h", float(PHYSICS_HEIGHT));
+        }
+        else if (kw == "player") {
             auto f = parse_fields(ss);
             float x = getf(f, "x", float(PHYSICS_WIDTH)  * 0.5f);
             float y = getf(f, "y", float(PHYSICS_HEIGHT) * 0.5f);

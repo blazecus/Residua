@@ -51,16 +51,18 @@ struct G2P2GPushConstants {
     float      friction_angle;
     float      plasticity;
     uint32_t   fixed_point_mult;
-    uint32_t   cell_size;   
+    uint32_t   cell_size;
+    glm::vec2  camera_offset;    // world → screen: screen_pos = world_pos - camera_offset
 };
-static_assert(sizeof(G2P2GPushConstants) == 64);
+static_assert(sizeof(G2P2GPushConstants) == 72);
 
 struct ParticleDrawPushConstants {
     glm::uvec2 grid_size;
     uint32_t   particle_count;
     uint32_t   cell_size;
+    glm::vec2  camera_offset;
 };
-static_assert(sizeof(ParticleDrawPushConstants) == 16);
+static_assert(sizeof(ParticleDrawPushConstants) == 24);
 
 struct GridBCPushConstants {
     glm::uvec2 grid_size;
@@ -96,7 +98,9 @@ public:
 
     void dispatch_render(VkCommandBuffer cmd);
 
-    uint32_t particle_count() const { return particle_count_; }
+    uint32_t  particle_count() const { return particle_count_; }
+
+    glm::vec2 camera_offset { 0.f, 0.f };
 
 private:
     struct Pipeline {

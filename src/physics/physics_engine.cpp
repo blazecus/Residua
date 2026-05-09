@@ -7,6 +7,7 @@
 #include "manifold.h"
 #include <fmt/core.h>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <glm/gtx/rotate_vector.hpp>
@@ -395,24 +396,40 @@ uint32_t PhysicsEngine::add_static_rect(ResiduaEngine* engine, glm::vec2 center,
     uint32_t slot = world.add_static_rect(center, w, h);
     const RigidBody& body = world.bodies[slot];
 
+    const uint32_t iw = body.sprite.width;
+    const uint32_t ih = body.sprite.height;
+    const uint32_t n  = iw * ih;
+
+    const uint32_t pixel_offset         = next_pixel;
+    next_pixel += n;
+    const uint32_t flipped_pixel_offset = next_pixel;
+    next_pixel += n;
+
+    const uint32_t sdf_size   = body.sdf_w * body.sdf_h;
+    const uint32_t sdf_offset = next_sdf_float;
+
     grow_buffers(engine, (uint32_t)world.bodies.size(), next_pixel);
-    grow_sdf_buffer(engine, next_sdf_float + body.sdf_w * body.sdf_h);
+    grow_sdf_buffer(engine, next_sdf_float + sdf_size);
+    next_sdf_float += sdf_size;
 
     if (slot >= (uint32_t)body_draw_info.size())
         body_draw_info.resize(slot + 1);
 
-    const uint32_t sdf_offset  = next_sdf_float;
-    next_sdf_float += body.sdf_w * body.sdf_h;
-    std::memcpy(static_cast<float*>(sdf_data_buf.info.pMappedData) + sdf_offset,
-                body.sdf.data(), body.sdf_w * body.sdf_h * sizeof(float));
-
     const uint32_t edge_offset = next_vert;
     const uint32_t edge_count  = (uint32_t)body.shape.size();
     next_vert += edge_count;
-    std::memcpy(static_cast<glm::vec2*>(body_verts_buf.info.pMappedData) + edge_offset,
-                body.shape.data(), edge_count * sizeof(glm::vec2));
 
-    body_draw_info[slot] = { 0, 0, 0, 0, sdf_offset, edge_offset, edge_count };
+    body_draw_info[slot] = { pixel_offset, flipped_pixel_offset, iw, ih, sdf_offset, edge_offset, edge_count };
+
+    auto* vert_dst = static_cast<glm::vec2*>(body_verts_buf.info.pMappedData);
+    std::memcpy(vert_dst + edge_offset, body.shape.data(), edge_count * sizeof(glm::vec2));
+
+    auto* px_dst = static_cast<glm::vec4*>(pixel_colors_buf.info.pMappedData);
+    std::memcpy(px_dst + pixel_offset,         body.sprite.pixels.data(), n * sizeof(glm::vec4));
+    std::memcpy(px_dst + flipped_pixel_offset, body.sprite.pixels.data(), n * sizeof(glm::vec4));
+
+    auto* sdf_dst = static_cast<float*>(sdf_data_buf.info.pMappedData);
+    std::memcpy(sdf_dst + sdf_offset, body.sdf.data(), sdf_size * sizeof(float));
 
     return slot;
 }
@@ -767,7 +784,7 @@ void PhysicsEngine::upload_draw_data()
         if (!has_sprite && !is_sdf_only && !force_sdf_only) continue;
 
         RigidBodyDrawGPU draw{};
-        draw.position         = glm::vec2(rb.position);
+        draw.position         = glm::vec2(rb.position) - camera_offset;
         draw.rotation         = rb.position.z;
         draw.total_mass       = rb.mass;
         draw.velocity         = glm::vec2(rb.velocity);

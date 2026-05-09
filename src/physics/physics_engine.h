@@ -39,15 +39,15 @@ static constexpr uint32_t COLOR_JP_ITERS   = 16;
 static constexpr uint32_t MAX_DRAW_LAYERS  = 4;
 
 struct GPUBodyInfo {
-    glm::vec2 pos;           
-    float     angle;        
-    uint32_t  edge_offset;  
-    uint32_t  edge_count;  
-    uint32_t  sdf_offset;  
-    uint32_t  sdf_w; 
-    uint32_t  sdf_h; 
-    glm::vec2 com_local;  
-};                 
+    glm::vec2 pos;
+    float     angle;
+    uint32_t  edge_offset;
+    uint32_t  edge_count;
+    uint32_t  sdf_offset;
+    uint32_t  sdf_w;
+    uint32_t  sdf_h;
+    glm::vec2 com_local;
+};
 static_assert(sizeof(GPUBodyInfo) == 40);
 
 struct GPUPair {
@@ -88,7 +88,7 @@ public:
     ParticleSim  particle_sim;
 
     AllocatedImage  output_screen;
-    AllocatedImage  velocity_image; 
+    AllocatedImage  velocity_image;
     AllocatedBuffer rb_draw_buf;
     AllocatedBuffer pixel_colors_buf;
     AllocatedBuffer active_indices_buf;
@@ -123,9 +123,9 @@ public:
 
     struct DrawPipeline manifold_gen_pl;
     VkDescriptorSet     manifold_gen_desc{VK_NULL_HANDLE};
-    AllocatedBuffer     body_info_buf;   
-    AllocatedBuffer     body_verts_buf;  
-    AllocatedBuffer     pair_buf;      
+    AllocatedBuffer     body_info_buf;
+    AllocatedBuffer     body_verts_buf;
+    AllocatedBuffer     pair_buf;
     AllocatedBuffer     contact_buf;
     AllocatedBuffer     counter_buf;
     uint32_t            next_vert{0};
@@ -140,6 +140,8 @@ public:
     AllocatedBuffer     col_colors_buf;
 
     ResiduaEngine* engine_ref{nullptr};
+
+    glm::vec2 camera_offset {0.f, 0.f};  // world-space top-left of the viewport
 
     uint32_t layer_offsets[MAX_DRAW_LAYERS]{};
     uint32_t layer_counts [MAX_DRAW_LAYERS]{};

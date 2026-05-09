@@ -26,6 +26,7 @@ layout(push_constant) uniform PC {
     float    plasticity;
     uint     fixed_point_mult;
     uint     cell_size;
+    vec2     camera_offset;
 } pc;
 
 struct Particle {
@@ -141,9 +142,16 @@ void main() {
     Particle p = particles[idx];
     if (p.enabled < 0.5) return;
 
-    // Particle positions are in pixel space; convert to cell space for the grid.
-    float      cs  = float(pc.cell_size);
-    vec2       cp  = p.position / cs;   
+    float cs = float(pc.cell_size);
+
+    // screen space conversion
+    vec2 sp = p.position - pc.camera_offset;
+
+    // pausing unseen particles - change later
+    vec2 grid_px = vec2(pc.grid_size) * cs;
+    if (any(lessThan(sp, vec2(0.0))) || any(greaterThanEqual(sp, grid_px))) return;
+
+    vec2       cp  = sp / cs;
     WeightInfo wi  = quad_weights(cp);
     int        mat = int(p.material + 0.5);
 
@@ -230,33 +238,35 @@ void main() {
                 p.deformation_gradient = svd.U * diag2(svd.Sigma) * svd.Vt;
             }
 
-            // Gravity is applied at the grid level in particle_grid_bc.comp,
-            p.position = project_guardian(p.position + p.displacement);
+            // Integrate in screen space, then convert back to world space.
+            sp = project_guardian(sp + p.displacement);
+            p.position = sp + pc.camera_offset;
 
-            // ── Particle-level SDF push-out (matches pbmpm reference §particle collide) ─
-            // might have to change later
+            // ── Particle-level SDF push-out ──────────────────────────────────
+            // vel_image is in screen space; sample using sp (screen position).
             {
-                ivec2 pix = clamp(ivec2(floor(p.position)),
-                                  ivec2(0), ivec2(pc.grid_size) - ivec2(1));
+                ivec2 pix = clamp(ivec2(floor(sp)),
+                                  ivec2(0), ivec2(pc.grid_size) * int(pc.cell_size) - ivec2(1));
                 float sv = imageLoad(vel_image, pix).b;
                 if (sv < 0.0) {
                     float depth = -sv;
                     ivec2 lo = max(pix - ivec2(1), ivec2(0));
-                    ivec2 hi = min(pix + ivec2(1), ivec2(pc.grid_size) - ivec2(1));
+                    ivec2 hi = min(pix + ivec2(1), ivec2(pc.grid_size) * int(pc.cell_size) - ivec2(1));
                     float dx = imageLoad(vel_image, ivec2(hi.x, pix.y)).b
                              - imageLoad(vel_image, ivec2(lo.x, pix.y)).b;
                     float dy = imageLoad(vel_image, ivec2(pix.x, hi.y)).b
                              - imageLoad(vel_image, ivec2(pix.x, lo.y)).b;
                     float glen = length(vec2(dx, dy));
                     if (glen > 1e-6) {
-                        vec2 world_normal = vec2(dx, dy) / glen;
-                        p.position += depth * world_normal;
+                        vec2 normal = vec2(dx, dy) / glen;
+                        sp         += depth * normal;
+                        p.position  = sp + pc.camera_offset;
                     }
                 }
             }
         }
 
-        particles[idx] = p; 
+        particles[idx] = p;
     }
 
     if (mat == MAT_LIQUID) {

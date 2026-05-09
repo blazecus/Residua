@@ -284,6 +284,7 @@ void ParticleSim::dispatch_physics(VkCommandBuffer cmd, float dt)
         pc.plasticity        = settings.plasticity;
         pc.fixed_point_mult  = FIXED_POINT_MULT;
         pc.cell_size         = cs;
+        pc.camera_offset     = camera_offset;
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g2p2g_pl.pipeline);
         vkCmdPushConstants(cmd, g2p2g_pl.layout,
@@ -339,6 +340,7 @@ void ParticleSim::dispatch_render(VkCommandBuffer cmd)
         .grid_size      = { PHYSICS_WIDTH / cs, PHYSICS_HEIGHT / cs },
         .particle_count = particle_count_,
         .cell_size      = cs,
+        .camera_offset  = camera_offset,
     };
     vkCmdPushConstants(cmd, draw_pl.layout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);

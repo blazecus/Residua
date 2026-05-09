@@ -46,13 +46,16 @@ void Game::run() {
 
     while (!bQuit) {
 
-        auto physics_mouse = [&]() -> glm::vec2 {
+        auto screen_mouse = [&]() -> glm::vec2 {
             int mx, my;
             SDL_GetMouseState(&mx, &my);
             return {
                 mx * float(PHYSICS_WIDTH)  / float(engine._windowExtent.width),
                 my * float(PHYSICS_HEIGHT) / float(engine._windowExtent.height)
             };
+        };
+        auto physics_mouse = [&]() -> glm::vec2 {
+            return screen_mouse() + scene_manager.camera_offset;
         };
 
         client.resetInput();
@@ -152,6 +155,9 @@ void Game::run() {
         }
 
         lastSpawn++;
+
+        physics_engine.camera_offset                    = scene_manager.camera_offset;
+        physics_engine.particle_sim.camera_offset       = scene_manager.camera_offset;
 
         if (!freeze_rendering) {
             engine._dt = delta;
