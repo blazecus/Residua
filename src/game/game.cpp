@@ -70,10 +70,7 @@ void Game::run() {
 
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT
                     && !ImGui::GetIO().WantCaptureMouse) {
-                glm::vec2 mpos = {
-                    e.button.x * float(PHYSICS_WIDTH)  / float(engine._windowExtent.width),
-                    e.button.y * float(PHYSICS_HEIGHT) / float(engine._windowExtent.height)
-                };
+                glm::vec2 mpos = physics_mouse();
                 if (auto hit = physics_engine.body_at(mpos)) {
                     auto& body = physics_engine.world.bodies[*hit];
                     if (body.inv_mass > 0.f) {

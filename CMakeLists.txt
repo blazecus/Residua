@@ -1,6 +1,3 @@
-﻿# CMakeList.txt : CMake project for vulkan_guide, include source and define
-# project specific logic here.
-#
 cmake_minimum_required (VERSION 3.8)
 
 project ("Residua")
@@ -12,9 +9,8 @@ add_subdirectory(third_party)
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
-
-add_executable (Residua
-  src/main.cpp
+# ── Sources shared between the exe and the Python extension ──────────────────
+set(RESIDUA_COMMON_SOURCES
   src/game/input_manager.h
   src/game/game.cpp
   src/game/game.h
@@ -40,8 +36,6 @@ add_executable (Residua
   src/renderer/vk_pipelines.h
   src/renderer/vk_descriptors.cpp
   src/renderer/vk_descriptors.h
-  src/renderer/vk_pipelines.cpp
-  src/renderer/vk_pipelines.h
   src/physics/body_image.cpp
   src/physics/body_image.h
   src/physics/lbvh.h
@@ -67,22 +61,65 @@ add_executable (Residua
   src/physics/physics_api.cpp
   src/game/player/player_character.h
   src/game/player/player_character.cpp
+  src/game/player/movement_state.h
+  src/game/player/movement_state.cpp
+  src/game/player/player_api.h
+  src/game/player/player_api.cpp
+)
+
+# ── Game executable ───────────────────────────────────────────────────────────
+add_executable(Residua
+  src/main.cpp
+  ${RESIDUA_COMMON_SOURCES}
 )
 
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
 target_compile_definitions(Residua PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
-
 target_include_directories(Residua PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-
 target_link_libraries(Residua PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
-
-target_precompile_headers(Residua PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
+target_precompile_headers(Residua PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp> <glm/vec4.hpp> <vulkan/vulkan.h>)
 
 add_custom_command(TARGET Residua POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:Residua> $<TARGET_FILE_DIR:Residua>
   COMMAND_EXPAND_LISTS
+)
+
+# ── Python extension module ───────────────────────────────────────────────────
+find_package(Python3 COMPONENTS Interpreter Development.Module)
+
+if(Python3_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        v2.13.6
+  )
+  FetchContent_MakeAvailable(pybind11)
+
+  pybind11_add_module(residua_py
+    src/game/py_env.h
+    src/game/py_env.cpp
+    src/game/residua_py.cpp
+    ${RESIDUA_COMMON_SOURCES}
   )
 
+  set_property(TARGET residua_py PROPERTY CXX_STANDARD 20)
+  target_compile_definitions(residua_py PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+  target_include_directories(residua_py PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(residua_py PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
+  target_precompile_headers(residua_py REUSE_FROM Residua)
+
+  add_custom_command(TARGET residua_py POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:residua_py> $<TARGET_FILE_DIR:residua_py>
+    COMMAND_EXPAND_LISTS
+  )
+
+  add_dependencies(residua_py Shaders)
+else()
+  message(STATUS "Python not found — skipping residua_py. Re-run cmake with -DPython3_EXECUTABLE=<path/to/python.exe>")
+endif()
+
+# ── Shader compilation ────────────────────────────────────────────────────────
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
 
 file(GLOB_RECURSE GLSL_SOURCE_FILES
@@ -96,11 +133,8 @@ file(GLOB_RECURSE GLSL_HEADER_FILES
     )
 
 foreach(GLSL ${GLSL_SOURCE_FILES})
-  message(STATUS "BUILDING SHADER")
   get_filename_component(FILE_NAME ${GLSL} NAME)
   set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${FILE_NAME}.spv")
-  message(STATUS ${GLSL})
-  message(STATUS COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV})
   add_custom_command(
     OUTPUT ${SPIRV}
     COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.3 ${GLSL} -I${PROJECT_SOURCE_DIR}/shaders -o ${SPIRV}
@@ -108,9 +142,5 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
   list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
-add_custom_target(
-    Shaders
-    DEPENDS ${SPIRV_BINARY_FILES}
-    )
-
+add_custom_target(Shaders DEPENDS ${SPIRV_BINARY_FILES})
 add_dependencies(Residua Shaders)

@@ -467,7 +467,7 @@ std::optional<uint32_t> PhysicsEngine::body_at(glm::vec2 world_pos) const
         glm::vec2 local = { c * delta.x - s * delta.y,
                             s * delta.x + c * delta.y };
 
-        local += glm::vec2((float)bdi.body_w, (float)bdi.body_h) * 0.5f - 0.5f;
+        local += rb.com_local + glm::vec2((float)bdi.body_w, (float)bdi.body_h) * 0.5f - 0.5f;
 
         int px = (int)std::floor(local.x), py = (int)std::floor(local.y);
         if (px < 0 || py < 0 ||
@@ -833,6 +833,14 @@ void PhysicsEngine::run_draw(VkCommandBuffer cmd, uint32_t count, uint32_t offse
         .pMemoryBarriers    = &draw_barrier,
     };
     vkCmdPipelineBarrier2(cmd, &dep2);
+}
+
+void PhysicsEngine::step_physics(float dt)
+{
+    world.prepare();
+    run_coloring();      
+    run_manifold_gen(); 
+    world.solve(dt);
 }
 
 PhysicsStats PhysicsEngine::get_stats(){

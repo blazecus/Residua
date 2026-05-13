@@ -1,8 +1,10 @@
 #pragma once
 
 #include <src/physics/physics_engine.h>
+#include <src/physics/joint.h>
 #include <src/physics/body_image.h>
 #include <array>
+#include "movement_state.h"
 
 class ResiduaEngine;
 
@@ -13,6 +15,15 @@ enum class Limb : uint32_t {
     UpperArmR, ForearmR, HandR,
     ThighL,    LowerLegL, FootL,
     ThighR,    LowerLegR, FootR,
+    Count
+};
+
+enum class Joint : uint32_t {
+    Neck = 0,
+    ShoulderL, ElbowL, WristL,
+    ShoulderR, ElbowR, WristR,
+    HipL, KneeL, AnkleL,
+    HipR, KneeR, AnkleR,
     Count
 };
 
@@ -27,12 +38,11 @@ struct PlayerCharacter {
     static constexpr uint32_t PLAYER_LAYER = 0x00000002u;
     static constexpr uint32_t PLAYER_MASK  = ~PLAYER_LAYER;
 
-    std::array<uint32_t, (size_t)Limb::Count> limbs;
-    uint32_t hitbox_id { INVALID };
+    std::array<uint32_t,       (size_t)Limb::Count>  limbs;
+    std::array<DistanceJoint*, (size_t)Joint::Count> joint_ptrs;
 
-    PlayerCharacter() { limbs.fill(INVALID); }
+    PlayerCharacter() { limbs.fill(INVALID); joint_ptrs.fill(nullptr); }
 
-    LoadedBodyImage img_hitbox;
     LoadedBodyImage img_torso;
     LoadedBodyImage img_head;
     LoadedBodyImage img_upper_arm;
@@ -43,8 +53,9 @@ struct PlayerCharacter {
     LoadedBodyImage img_foot;
 
     void load_assets();
-    void spawn  (PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 position);
-    void despawn(PhysicsEngine& pe);
+    void spawn   (PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 position);
+    void despawn (PhysicsEngine& pe);
+    void reset_to(PhysicsEngine& pe, glm::vec2 pos);
 
     // ── Movement (set each frame by the caller) ────────────────────────────────
     float move_dir            { 0.f };
@@ -76,16 +87,40 @@ struct PlayerCharacter {
     float jump_foot_x               {  6.f };
     float jump_foot_y               {  8.f };
     float jump_foot_y_low           { 25.f };
+    float joint_bend_stiffness      {400.f };
+    float wall_check_dist           { 40.f };
     AnimationLegState animation_leg_state { AnimationLegState::Stationary };
 
-    glm::vec2 aim_pos {};  // physics-space mouse position, set each frame by the caller
+    glm::vec2 aim_pos {};
+
+    // ── Reward weights ─────────────────────────────────────────────────────────
+    float    reward_velocity      { 1.0f };  
+    float    reward_upright       { 0.5f };
+    float    reward_angular_vel   { 0.1f }; 
+    float    reward_alive         { 0.01f};  
+    float    reward_grounded_move { 0.2f }; 
+    float    reward_jump_vel        { 1.0f }; 
+    uint32_t jump_frame_delay       { 3    };  
+    float    standing_height        { 30.f }; 
+    float    reward_standing_height { 1.0f }; 
+    float    reward_arm_aim         { 0.5f }; 
+
+    MovementStateBuffer state_history;
+
+    void  capture_state(PhysicsEngine& pe);
+    float compute_reward(float dt) const;
+
+    struct Action {
+        std::array<float, (size_t)Limb::Count> torques{};
+    };
+    void apply_action(PhysicsEngine& pe, const Action& action);
 
     void apply_inputs(float move_dir, bool walking, bool jump, glm::vec2 aim_pos);
     void handle_controls(PhysicsEngine& pe, float dt);
     void animate(PhysicsEngine& pe, float dt);
     void update(PhysicsEngine& pe, float dt);
 
-    bool      is_valid()                   const { return hitbox_id != INVALID; }
+    bool      is_valid()                   const { return limbs[(size_t)Limb::Torso] != INVALID; }
     uint32_t  limb_id(Limb l)             const { return limbs[(size_t)l]; }
     glm::vec2 position(PhysicsEngine& pe) const;
     glm::vec2 velocity(PhysicsEngine& pe) const;
@@ -109,19 +144,20 @@ private:
     bool  was_grounded  { false };
     float jump_timer    { 0.f };
 
-    float facing_dir    { 1.f };  // +1 = right, -1 = left
+    float facing_dir    { 1.f };
 
-    // Rate-limited world-space leg angles
     float thigh_angle_l { 0.f };
     float lower_angle_l { 0.f };
     float thigh_angle_r { 0.f };
     float lower_angle_r { 0.f };
 
-    // Spawn a static visual body — no mass, no collision response
     uint32_t spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
                         const LoadedBodyImage& img, glm::vec2 world_pos);
 
-    void place(PhysicsEngine& pe, Limb limb, glm::vec2 center, float angle);
+    void add_joint(PhysicsEngine& pe, Joint jnt, Limb parent, Limb child,
+                   glm::vec2 rA_local, glm::vec2 rB_local);
+
+    void set_rest_angle(Joint jnt, float parent_angle, float child_angle);
 
     std::optional<RaycastHit> select_next_step(PhysicsEngine& pe, bool right, float x_offset = 0.0f);
     std::optional<RaycastHit> get_standing_step(PhysicsEngine& pe, bool right);
@@ -132,8 +168,9 @@ private:
     void update_airborne(PhysicsEngine& pe, glm::vec2 air_normal);
     void interpolate_steps(float dt);
 
-    void animate_leg_fk(PhysicsEngine& pe, Limb thigh, Limb lower_leg, Limb foot,
-                        glm::vec2 hip, float thigh_angle, float lower_angle, float foot_angle);
-    void animate_legs(PhysicsEngine& pe, float dt, glm::vec2 torso_pos, float hbox_angle);
-    void animate_arms(PhysicsEngine& pe, glm::vec2 torso_pos, float hbox_angle);
+    void animate_leg_fk(Joint hip, Joint knee, Joint ankle,
+                        float parent_angle,
+                        float thigh_angle, float lower_angle, float foot_angle);
+    void animate_legs(PhysicsEngine& pe, float dt, glm::vec2 torso_pos, float torso_angle);
+    void animate_arms(PhysicsEngine& pe, glm::vec2 torso_pos, float torso_angle);
 };

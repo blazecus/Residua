@@ -168,6 +168,9 @@ public:
 
     void dispatch(VkCommandBuffer cmd, float dt);
 
+    // Physics-only step: coloring + manifold gen + solve, no draw commands.
+    void step_physics(float dt);
+
     PhysicsStats get_stats();
 
     // ── Body state ─────────────────────────────────────────────────────────────

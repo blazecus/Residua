@@ -19,6 +19,7 @@ static constexpr SceneEntry SCENE_LIST[] = {
     { "Softbody",    "../assets/scenes/softbody.scene"     },
     { "Player Test", "../assets/scenes/player_test.scene"  },
     { "Long Level",  "../assets/scenes/long_level.scene"   },
+    { "Training",    "../assets/scenes/training.scene"     },
 };
 static constexpr int NUM_SCENES = sizeof(SCENE_LIST) / sizeof(SCENE_LIST[0]);
 

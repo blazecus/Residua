@@ -44,11 +44,6 @@ bool Manifold::initialize() {
     }
     else {
         //pts = build_manifold(ba, bb);
-        /*
-        if (!pts.empty())
-            printf("cpu fallback: %u contacts for pair (%u,%u)\n",
-                   (uint32_t)pts.size(), bodyA, bodyB);
-                   */
     }
     pts = reduce_manifold(std::move(pts), MANIFOLD_MAX_CONTACTS);
     numContacts = (int)pts.size();
