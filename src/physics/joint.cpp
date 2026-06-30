@@ -60,10 +60,17 @@ void DistanceJoint::computeConstraint(float alpha) {
     glm::vec2 pA = glm::vec2(ba.position) + rAw;
     glm::vec2 pB = glm::vec2(bb.position) + rBw;
 
+    float rel_angle = ba.position.z - bb.position.z;
+
     float Cn[3];
     Cn[0] = pA.x - pB.x;
     Cn[1] = pA.y - pB.y;
-    Cn[2] = (ba.position.z - bb.position.z - rest_angle) * torqueArm;
+
+    if (bend_stiffness > 0.f) {
+        float diff = rel_angle - rest_angle;
+        diff = std::atan2(std::sin(diff), std::cos(diff));
+        Cn[2] = diff * torqueArm;
+    }
 
     for (int i = 0; i < rows(); i++)
         C[i] = std::isinf(stiffness[i]) ? Cn[i] - C0[i] * alpha : Cn[i];
@@ -75,9 +82,9 @@ void DistanceJoint::computeDerivatives(uint32_t bi) {
 
         J[0] = {  1.f,  0.f, -rAw.y };
         J[1] = {  0.f,  1.f,  rAw.x };
-        J[2] = { 0.f, 0.f, torqueArm };
         H[0] = {}; H[0].row[2].z = -rAw.x;
         H[1] = {}; H[1].row[2].z = -rAw.y;
+        J[2] = angular_reaction ? glm::vec3{ 0.f, 0.f, torqueArm } : glm::vec3{ 0.f };
         H[2] = {};
 
     } else {

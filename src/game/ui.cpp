@@ -61,16 +61,16 @@ void UIManager::draw() {
         ImGui::SliderFloat("Step time",        &player.step_time,           0.05f, 1.f);
         ImGui::SliderFloat("Step length",      &player.step_length_test,    0.f,   200.f);
         ImGui::SliderFloat("Leg angle speed",  &player.max_leg_angle_speed,  1.f,  50.f);
-        ImGui::SliderFloat("Upright stiffness",    &player.upright_stiffness,          0.f,   30.f);
-        ImGui::SliderFloat("Forward lean",         &player.forward_lean,               0.f,    0.6f);
-        ImGui::SliderFloat("Ground spring k",      &player.ground_spring_k,            0.f, 10000.f);
-        ImGui::SliderFloat("Ground spring rest",   &player.ground_spring_rest_length,  0.f,   100.f);
+        ImGui::SliderFloat("Bend stiffness", &player.joint_bend_stiffness, 0.f, 50000.f);
         ImGui::SeparatorText("Jump");
-        ImGui::SliderFloat("Jump impulse",         &player.jump_impulse,               0.f,  1000.f);
         ImGui::SliderFloat("Air accel",            &player.air_accel,                  0.f,  5000.f);
         ImGui::SliderFloat("Ground check dist",    &player.ground_check_dist,          0.f,   200.f);
         ImGui::SliderFloat("Airborne dist",        &player.jump_airborne_dist,         0.f,   100.f);
-        ImGui::SliderFloat("Spring disable time",  &player.jump_spring_disable_time,   0.f,     2.f);
+        ImGui::SeparatorText("State");
+        if (player.state_history.full()) {
+            const MovementState& st = player.state_history.at(0);
+            ImGui::Text("Ground dist:   %.2f  (goal: %.2f)", st.ground_dist, player.standing_height);
+        }
         ImGui::End();
     }
 

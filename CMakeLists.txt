@@ -6,6 +6,16 @@ find_package(Vulkan REQUIRED)
 
 add_subdirectory(third_party)
 
+include(FetchContent)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+set(JSON_Install    OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(nlohmann_json)
+
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
@@ -59,6 +69,10 @@ set(RESIDUA_COMMON_SOURCES
   src/physics/particle_sim.cpp
   src/physics/particle_sim.h
   src/physics/physics_api.cpp
+  src/game/player/character_config.h
+  src/game/player/character_config.cpp
+  src/game/player/animation_clip.h
+  src/game/player/animation_clip.cpp
   src/game/player/player_character.h
   src/game/player/player_character.cpp
   src/game/player/movement_state.h
@@ -76,7 +90,7 @@ add_executable(Residua
 set_property(TARGET Residua PROPERTY CXX_STANDARD 20)
 target_compile_definitions(Residua PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(Residua PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(Residua PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
+target_link_libraries(Residua PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui nlohmann_json::nlohmann_json)
 target_precompile_headers(Residua PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp> <glm/vec4.hpp> <vulkan/vulkan.h>)
 
 add_custom_command(TARGET Residua POST_BUILD
@@ -85,7 +99,9 @@ add_custom_command(TARGET Residua POST_BUILD
 )
 
 # ── Python extension module ───────────────────────────────────────────────────
-find_package(Python3 COMPONENTS Interpreter Development.Module)
+set(Python3_FIND_REGISTRY NEVER)
+set(Python3_FIND_STRATEGY LOCATION)
+find_package(Python3 COMPONENTS Interpreter Development)
 
 if(Python3_FOUND)
   include(FetchContent)
@@ -106,7 +122,7 @@ if(Python3_FOUND)
   set_property(TARGET residua_py PROPERTY CXX_STANDARD 20)
   target_compile_definitions(residua_py PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
   target_include_directories(residua_py PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-  target_link_libraries(residua_py PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui)
+  target_link_libraries(residua_py PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui nlohmann_json::nlohmann_json)
   target_precompile_headers(residua_py REUSE_FROM Residua)
 
   add_custom_command(TARGET residua_py POST_BUILD

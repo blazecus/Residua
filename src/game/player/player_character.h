@@ -4,7 +4,11 @@
 #include <src/physics/joint.h>
 #include <src/physics/body_image.h>
 #include <array>
+#include <limits>
+#include <unordered_map>
 #include "movement_state.h"
+#include "character_config.h"
+#include "animation_clip.h"
 
 class ResiduaEngine;
 
@@ -33,6 +37,13 @@ enum class AnimationLegState : uint32_t {
     Running
 };
 
+enum class PlayerAnimState : uint32_t {
+    Standing = 0,
+    Running,
+    Jumping,
+    Airborn
+};
+
 struct PlayerCharacter {
     static constexpr uint32_t INVALID      = ~0u;
     static constexpr uint32_t PLAYER_LAYER = 0x00000002u;
@@ -43,16 +54,19 @@ struct PlayerCharacter {
 
     PlayerCharacter() { limbs.fill(INVALID); joint_ptrs.fill(nullptr); }
 
-    LoadedBodyImage img_torso;
-    LoadedBodyImage img_head;
-    LoadedBodyImage img_upper_arm;
-    LoadedBodyImage img_forearm;
-    LoadedBodyImage img_hand;
-    LoadedBodyImage img_thigh;
-    LoadedBodyImage img_lower_leg;
-    LoadedBodyImage img_foot;
+    CharacterConfig char_config;
+    std::unordered_map<std::string, LoadedBodyImage> limb_images;
+    std::array<bool,  JOINT_COUNT> joint_animatable{};
+    std::array<bool,  JOINT_COUNT> joint_limited{};   
+    std::array<float, JOINT_COUNT> joint_angle_min{};
+    std::array<float, JOINT_COUNT> joint_angle_max{};
 
-    void load_assets();
+    AnimationClip anim_standing;
+
+    PlayerAnimState anim_state { PlayerAnimState::Standing };
+    float           anim_frame { 0.f };
+
+    void load_assets(const char* config_path = "../assets/animations/player.json");
     void spawn   (PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 position);
     void despawn (PhysicsEngine& pe);
     void reset_to(PhysicsEngine& pe, glm::vec2 pos);
@@ -63,62 +77,74 @@ struct PlayerCharacter {
     bool  jump                { false };
     float max_speed           { 280.f };
     float accel               {3000.f };
-    float upright_stiffness   {  6.f };
-    float upright_damping     { 20.f };
-    float forward_lean        { 0.018f };
-    float backward_lean       { 0.06f };
     float max_leg_angle_speed {  9.8f };
-    float stride_height       {  5.f };
     float step_time           { 0.46f };
     float step_length_test    { 45.f };
-    float step_interp_k       {  0.5f };
     float walk_speed          {100.0f };
-    float stationary_speed    { 10.0f };
-    float arm_swing_amplitude    {  0.4f };
-    float ground_spring_k           {5000.f };
-    float ground_spring_damping     { 20.f };
-    float ground_spring_rest_length { 30.f };
-    float ground_spring_max_dist    { 60.f };
-    float jump_impulse              { 200.f };
+
     float air_accel                 { 600.f };
-    float jump_spring_disable_time  {  0.3f };
     float ground_check_dist         { 50.f };
     float jump_airborne_dist        { 90.f };
     float jump_foot_x               {  6.f };
     float jump_foot_y               {  8.f };
     float jump_foot_y_low           { 25.f };
-    float joint_bend_stiffness      {400.f };
+    float max_joint_torque          { 1e8f };  
+    std::array<float, JOINT_COUNT> joint_goal_angle{};
     float wall_check_dist           { 40.f };
+    float arm_angle_speed           { 10.f };  
     AnimationLegState animation_leg_state { AnimationLegState::Stationary };
 
     glm::vec2 aim_pos {};
 
-    // ── Reward weights ─────────────────────────────────────────────────────────
-    float    reward_velocity      { 1.0f };  
-    float    reward_upright       { 0.5f };
-    float    reward_angular_vel   { 0.1f }; 
-    float    reward_alive         { 0.01f};  
-    float    reward_grounded_move { 0.2f }; 
-    float    reward_jump_vel        { 1.0f }; 
-    uint32_t jump_frame_delay       { 3    };  
-    float    standing_height        { 30.f }; 
-    float    reward_standing_height { 1.0f }; 
-    float    reward_arm_aim         { 0.5f }; 
+    float    joint_bend_stiffness { 250.f };
+
+    float    torso_upright_stiffness { 8000.f }; 
+    float    torso_upright_damping   {  600.f }; 
+
+    float    reward_anim_match     {  10.0f   };
+    float    reward_alive          {  0.01f  }; 
+    float    standing_height       { 25.f   }; 
+
+    float    reward_height         { 15.0f   }; 
+    float    reward_upright        { 10.0f   };
+    float    reward_feet_below     { 3.0f   };
+    float    reward_feet_near_x    { 2.0f   }; 
+    float    feet_near_x_threshold { 20.f   };
+    float    penalty_velocity      { 0.00005f}; 
+    float    penalty_torso_spin   { 1.0f    }; 
+    float    penalty_action_rate   { 0.05f  }; 
+    float    penalty_joint_limit   { 0.1f   }; 
+    float    joint_limit_threshold { 1.5f   }; 
+
+    float    low_speed_threshold       { 2.0f };
+    float    upright_angle_threshold   { 0.3f };
+    float    height_threshold          { 10.f };
 
     MovementStateBuffer state_history;
 
     void  capture_state(PhysicsEngine& pe);
     float compute_reward(float dt) const;
 
+    void get_anim_goals(std::array<float, JOINT_COUNT>& current_out,
+                        std::array<float, JOINT_COUNT>& next_out) const;
+
+    void animate_left_arm(PhysicsEngine& pe);
+
+    float ankle_bend_stiffness { 3.f };
+
     struct Action {
-        std::array<float, (size_t)Limb::Count> torques{};
+        std::array<float, (size_t)Joint::Count> goal_angle_change{};
     };
+    Action current_action{};
+    Action previous_action{};
     void apply_action(PhysicsEngine& pe, const Action& action);
 
     void apply_inputs(float move_dir, bool walking, bool jump, glm::vec2 aim_pos);
     void handle_controls(PhysicsEngine& pe, float dt);
+    void apply_joint_goals(PhysicsEngine& pe);
     void animate(PhysicsEngine& pe, float dt);
-    void update(PhysicsEngine& pe, float dt);
+    void test_animate(PhysicsEngine& pe);
+    void update(PhysicsEngine& pe, float dt, bool apply_controls = true);
 
     bool      is_valid()                   const { return limbs[(size_t)Limb::Torso] != INVALID; }
     uint32_t  limb_id(Limb l)             const { return limbs[(size_t)l]; }
@@ -143,8 +169,16 @@ private:
     bool  grounded      { false };
     bool  was_grounded  { false };
     float jump_timer    { 0.f };
+    float upright_timer_   { 0.f };
+    float height_timer_    { 0.f };
+    float low_speed_timer_ { 0.f };
 
     float facing_dir    { 1.f };
+
+    float arm_shoulder_rest { 0.f };
+    float arm_elbow_rest    { 0.f };
+    float arm_wrist_rest    { 0.f };
+
 
     float thigh_angle_l { 0.f };
     float lower_angle_l { 0.f };
@@ -152,10 +186,13 @@ private:
     float lower_angle_r { 0.f };
 
     uint32_t spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
-                        const LoadedBodyImage& img, glm::vec2 world_pos);
+                        const LoadedBodyImage& img, glm::vec2 world_pos,
+                        float density = 0.f);
 
     void add_joint(PhysicsEngine& pe, Joint jnt, Limb parent, Limb child,
-                   glm::vec2 rA_local, glm::vec2 rB_local);
+                   glm::vec2 rA_local, glm::vec2 rB_local,
+                   float bend_stiffness = -1.f,
+                   float max_torque     = std::numeric_limits<float>::infinity());
 
     void set_rest_angle(Joint jnt, float parent_angle, float child_angle);
 

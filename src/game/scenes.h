@@ -45,7 +45,7 @@ struct SceneManager {
     void clear();
     void load(int idx);
     void apply_inputs(const InputManager::Inputs& inputs, glm::vec2 aim_pos);
-    void update(float dt);
+    void update(float dt, bool apply_controls = true);
 
     uint32_t spawn_body(const LoadedBodyImage& img, glm::vec2 world_pos);
 

@@ -35,8 +35,8 @@ void SceneManager::apply_inputs(const InputManager::Inputs& inputs, glm::vec2 ai
     );
 }
 
-void SceneManager::update(float dt) {
-    player.update(*physics, dt);
+void SceneManager::update(float dt, bool apply_controls) {
+    player.update(*physics, dt, apply_controls);
 
     if (player.is_valid()) {
         glm::vec2 ppos = player.position(*physics);

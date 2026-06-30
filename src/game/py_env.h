@@ -1,32 +1,55 @@
 #pragma once
 
 #include "game.h"
+#include "player/player_character.h"
 #include <vector>
 #include <tuple>
 
+struct AgentSlot {
+    PlayerCharacter character;
+    glm::vec2       spawn_pos    { 320.f, 170.f };
+    float           fallen_timer { 0.f };
+};
+
 struct PyEnv {
-    static constexpr int   OBS_SIZE         = 28;
-    // TODO: don't use this
-    static constexpr float FALL_ANGLE_LIMIT = 1.4f;  
+    static constexpr int FRAME_OBS_SIZE = 16 + (int)JOINT_COUNT + 2 * (int)LIMB_COUNT;
+    static constexpr int OBS_SIZE       = FRAME_OBS_SIZE + 4 * (int)JOINT_COUNT;
 
-    Game  game;
-    bool  initialized { false };
-    float spawn_x_    { 320.f };
-    float spawn_y_    { 170.f };
+    static constexpr float FALL_ANGLE_LIMIT = 1.4f;   
+    static constexpr float FALLEN_TIMEOUT   = 3.f;   
+    static constexpr float MAX_LINEAR_VEL   = 10000.f;
+    static constexpr float MAX_ANGULAR_VEL  = 80.f * 6.2832f;
 
-    // Initialise SDL + Vulkan + physics, load a scene, and spawn the player.
-    void init(float spawn_x, float spawn_y, bool render = true, int scene_idx = 5);
+    static constexpr float AGENT_SPACING = 80.f;
 
-    // Advance one simulation step.
-    std::tuple<std::vector<float>, float, bool>
-    step(const std::vector<float>& torques, glm::vec2 aim_pos, bool render = true);
+    Game game;
+    bool initialized { false };
 
-    void reset(float spawn_x, float spawn_y);
+    std::vector<AgentSlot> agents_;
 
+    void init(int n_agents, float spawn_x, float spawn_y,
+              bool render = true, int scene_idx = 5);
+
+    // Advance one simulation step for all agents.
+    std::tuple<std::vector<std::vector<float>>, std::vector<float>, std::vector<bool>>
+    step(const std::vector<std::vector<float>>& all_angles,
+         const std::vector<float>& move_dirs,
+         const std::vector<bool>&  jumps,
+         const std::vector<float>& aim_xs,
+         const std::vector<float>& aim_ys,
+         bool sim_inputs = false, bool render = true);
+
+    void reset_agent(int i, float spawn_x = -1.f, float spawn_y = -1.f);
+    void reset_all  (float spawn_x = -1.f, float spawn_y = -1.f);
+
+    std::vector<float>              get_agent_obs(int i) const;
+    std::vector<std::vector<float>> get_obs_all()        const;
+
+    int  n_agents() const { return (int)agents_.size(); }
     void close();
 
 private:
-    std::vector<float> get_obs()  const;
-    bool               is_done()  const;
-    void               physics_only_step(float dt);
+    bool is_done(int i);
+    void physics_step(bool render);
+    void update_camera();
 };

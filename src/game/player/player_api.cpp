@@ -17,14 +17,14 @@ void residua_register(void* player_character, void* physics_engine)
     s_engine    = static_cast<PhysicsEngine*>(physics_engine);
 }
 
-void residua_set_action(const float* torques, int count)
+void residua_set_action(const float* angle_changes, int count)
 {
     if (!s_character || !s_engine) return;
 
     PlayerCharacter::Action action;
-    int n = std::min(count, residua_limb_count());
+    int n = std::min(count, (int)Joint::Count);
     for (int i = 0; i < n; ++i)
-        action.torques[i] = torques[i];
+        action.goal_angle_change[i] = angle_changes[i];
 
     s_character->apply_action(*s_engine, action);
 }

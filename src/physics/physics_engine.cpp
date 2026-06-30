@@ -368,9 +368,16 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
     if (slot >= (uint32_t)body_draw_info.size())
         body_draw_info.resize(slot + 1);
 
-    const uint32_t edge_offset = next_vert;
-    const uint32_t edge_count  = (uint32_t)body.shape.size();
-    next_vert += edge_count;
+    const uint32_t edge_count = (uint32_t)body.shape.size();
+    uint32_t edge_offset;
+    BodyGPUInfo& existing = body_draw_info[slot];
+    if (existing.edge_count == edge_count && existing.edge_offset < next_vert) {
+        // Reuse the vertex slot from when this body index was previously occupied.
+        edge_offset = existing.edge_offset;
+    } else {
+        edge_offset = next_vert;
+        next_vert += edge_count;
+    }
 
     body_draw_info[slot] = { pixel_offset, flipped_pixel_offset, w, h, sdf_offset, edge_offset, edge_count };
 

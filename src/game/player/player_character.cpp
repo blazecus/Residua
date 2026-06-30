@@ -4,8 +4,42 @@
 #include <glm/gtx/rotate_vector.hpp>
 #include <limits>
 #include <cmath>
+#include <fmt/core.h>
 
-static constexpr float TORSO_ANG_DAMPING = 0.99f;
+// ── JSON id → enum mappings ────────────────────────────────────────────────────
+static const std::unordered_map<std::string, Limb> LIMB_FROM_ID = {
+    { "torso",       Limb::Torso      },
+    { "head",        Limb::Head       },
+    { "upper_arm_l", Limb::UpperArmL  },
+    { "forearm_l",   Limb::ForearmL   },
+    { "hand_l",      Limb::HandL      },
+    { "upper_arm_r", Limb::UpperArmR  },
+    { "forearm_r",   Limb::ForearmR   },
+    { "hand_r",      Limb::HandR      },
+    { "thigh_l",     Limb::ThighL     },
+    { "lower_leg_l", Limb::LowerLegL  },
+    { "foot_l",      Limb::FootL      },
+    { "thigh_r",     Limb::ThighR     },
+    { "lower_leg_r", Limb::LowerLegR  },
+    { "foot_r",      Limb::FootR      },
+};
+
+static const std::unordered_map<std::string, Joint> JOINT_FROM_ID = {
+    { "neck",       Joint::Neck      },
+    { "shoulder_l", Joint::ShoulderL },
+    { "elbow_l",    Joint::ElbowL    },
+    { "wrist_l",    Joint::WristL    },
+    { "shoulder_r", Joint::ShoulderR },
+    { "elbow_r",    Joint::ElbowR    },
+    { "wrist_r",    Joint::WristR    },
+    { "hip_l",      Joint::HipL      },
+    { "knee_l",     Joint::KneeL     },
+    { "ankle_l",    Joint::AnkleL    },
+    { "hip_r",      Joint::HipR      },
+    { "knee_r",     Joint::KneeR     },
+    { "ankle_r",    Joint::AnkleR    },
+};
+
 static constexpr float TORSO_HALF_H      = 10.f;
 
 // ── Limb skeleton ---------------------------------────────────────────────────
@@ -16,9 +50,8 @@ static constexpr float LOWER_MID        =  5.f;
 static constexpr float LOWER_TO_ANKLE   = 10.f;
 static constexpr float HIP_X            =  3.f;
 static constexpr float HIP_Y            =  8.f;
-static constexpr float ANKLE_RAISE      =  3.f;
-static constexpr float FOOT_OFF_X       =  1.f;
-static constexpr float FOOT_OFF_Y       =  1.f;
+static constexpr float ANKLE_RAISE      =  1.f;
+static constexpr float FOOT_OFF_X       =  2.f;
 
 // ── Head / neck ───────────────────────────────────────────────────────────────
 static constexpr float NECK_Y           = -10.f;
@@ -54,28 +87,46 @@ static constexpr float STEP_WALK_MULT     =   1.25f;
 static constexpr float STEP_RIGHT_EXTRA   =   5.f;
 static constexpr float STANDING_STEP_X    =  12.f;
 static constexpr float STANDING_ORIGIN_Y  =   3.f;
-static constexpr float SPRING_MIN_DIST    =   0.001f;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-void PlayerCharacter::load_assets()
+void PlayerCharacter::load_assets(const char* config_path)
 {
-    img_torso     = load_body_image("../assets/player/torso.png");
-    img_head      = load_body_image("../assets/player/head.png");
-    img_upper_arm = load_body_image("../assets/player/upper_arm.png");
-    img_forearm   = load_body_image("../assets/player/forearm.png");
-    img_hand      = load_body_image("../assets/player/hand.png");
-    img_thigh     = load_body_image("../assets/player/thigh.png");
-    img_lower_leg = load_body_image("../assets/player/lower_leg.png");
-    img_foot      = load_body_image("../assets/player/foot.png");
+    if (!char_config.load(config_path)) {
+        fmt::print("[PlayerCharacter] Failed to load character config: {}\n", config_path);
+        return;
+    }
+    limb_images.clear();
+    for (const auto& [id, sprite] : char_config.limb_sprites)
+        limb_images[id] = load_body_image(("../" + sprite).c_str());
+
+    anim_standing.load("../assets/animations/standing.json");
+
+    // Build animatable-joint mask and angle limits from character config
+    joint_animatable.fill(false);
+    joint_limited.fill(false);
+    joint_angle_min.fill(-3.14159f);
+    joint_angle_max.fill( 3.14159f);
+    for (const auto& [jid, jc] : char_config.joints) {
+        auto it = JOINT_FROM_ID.find(jid);
+        if (it != JOINT_FROM_ID.end()) {
+            size_t idx = (size_t)it->second;
+            joint_animatable[idx] = jc.animatable;
+            joint_angle_min [idx] = jc.angle_min;
+            joint_angle_max [idx] = jc.angle_max;
+            joint_limited   [idx] = (jc.angle_max - jc.angle_min) < 6.2831f;
+        }
+    }
 }
 
 uint32_t PlayerCharacter::spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
-                                      const LoadedBodyImage& img, glm::vec2 world_pos)
+                                      const LoadedBodyImage& img, glm::vec2 world_pos,
+                                      float density)
 {
     RigidBody rb;
-    rb.sprite          = img;
-    rb.compute_mass_properties();
+    rb.sprite = img;
+    rb.compute_mass_properties(density > 0.f ? density : 1.f);
     rb.generate_shape();
     rb.generate_sdf();
     rb.position        = glm::vec3(world_pos, 0.f);
@@ -85,20 +136,25 @@ uint32_t PlayerCharacter::spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
 }
 
 void PlayerCharacter::add_joint(PhysicsEngine& pe, Joint jnt, Limb parent, Limb child,
-                                 glm::vec2 rA_local, glm::vec2 rB_local)
+                                 glm::vec2 rA_local, glm::vec2 rB_local,
+                                 float /*bend_stiffness*/, float /*max_torque*/)
 {
     auto j = std::make_unique<DistanceJoint>(
         &pe.world,
         limbs[(size_t)parent], limbs[(size_t)child],
-        rA_local, rB_local);
+        rA_local, rB_local,
+        std::numeric_limits<float>::infinity(),
+        joint_bend_stiffness);
     joint_ptrs[(size_t)jnt] = j.get();
+    bool left_arm = (jnt == Joint::ShoulderL || jnt == Joint::ElbowL || jnt == Joint::WristL);
+    if (left_arm)
+        j->angular_reaction = false;
     pe.world.add_force(std::move(j));
 }
 
 void PlayerCharacter::set_rest_angle(Joint jnt, float parent_angle, float child_angle)
 {
-    if (auto* j = joint_ptrs[(size_t)jnt])
-        j->rest_angle = parent_angle - child_angle;
+    joint_goal_angle[(size_t)jnt] = parent_angle - child_angle;
 }
 
 void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
@@ -106,96 +162,77 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
     limbs.fill(INVALID);
     joint_ptrs.fill(nullptr);
 
-    // torso
-    {
-        RigidBody rb;
-        rb.sprite          = img_torso;
-        rb.compute_mass_properties();
-        rb.generate_shape();
-        rb.generate_sdf();
-        rb.position        = glm::vec3(pos, 0.f);
-        rb.collision_layer = PLAYER_LAYER;
-        rb.collision_mask  = PLAYER_MASK;
-        rb.angular_damping = TORSO_ANG_DAMPING;
-        limbs[(size_t)Limb::Torso] = pe.add_body(&re, std::move(rb));
+    auto offsets = char_config.compute_spawn_offsets();
+
+    // Spawn all limbs from JSON definition
+    for (const auto& [lid, sprite] : char_config.limb_sprites) {
+        auto lit = LIMB_FROM_ID.find(lid);
+        if (lit == LIMB_FROM_ID.end()) continue;
+        glm::vec2 spawn_pos = pos + offsets.at(lid);
+
+        auto density_it = char_config.limb_densities.find(lid);
+        float density = (density_it != char_config.limb_densities.end()) ? density_it->second : 0.f;
+
+        if (lid == "torso") {
+            RigidBody rb;
+            rb.sprite          = limb_images.at(lid);
+            if (density > 0.f)
+                rb.compute_mass_properties(density);
+            else
+                rb.compute_mass_properties();
+            rb.generate_shape();
+            rb.generate_sdf();
+            rb.position        = glm::vec3(spawn_pos, 0.f);
+            rb.collision_layer = PLAYER_LAYER;
+            rb.collision_mask  = PLAYER_MASK;
+
+            limbs[(size_t)lit->second] = pe.add_body(&re, std::move(rb));
+        } else {
+            limbs[(size_t)lit->second] = spawn_limb(pe, re, limb_images.at(lid), spawn_pos, density);
+        }
     }
 
-    limbs[(size_t)Limb::Head]      = spawn_limb(pe, re, img_head,      pos + glm::vec2(0.f,        NECK_Y + HEAD_Y));
-    limbs[(size_t)Limb::UpperArmL] = spawn_limb(pe, re, img_upper_arm, pos + glm::vec2(-SHOULDER_X, SHOULDER_Y + UPPER_ARM_MID));
-    limbs[(size_t)Limb::ForearmL]  = spawn_limb(pe, re, img_forearm,   pos + glm::vec2(-SHOULDER_X, SHOULDER_Y + UPPER_ARM_LEN + FOREARM_MID));
-    limbs[(size_t)Limb::HandL]     = spawn_limb(pe, re, img_hand,      pos + glm::vec2(-SHOULDER_X, SHOULDER_Y + UPPER_ARM_LEN + FOREARM_LEN));
-    limbs[(size_t)Limb::UpperArmR] = spawn_limb(pe, re, img_upper_arm, pos + glm::vec2( SHOULDER_X, SHOULDER_Y + UPPER_ARM_MID));
-    limbs[(size_t)Limb::ForearmR]  = spawn_limb(pe, re, img_forearm,   pos + glm::vec2( SHOULDER_X, SHOULDER_Y + UPPER_ARM_LEN + FOREARM_MID));
-    limbs[(size_t)Limb::HandR]     = spawn_limb(pe, re, img_hand,      pos + glm::vec2( SHOULDER_X, SHOULDER_Y + UPPER_ARM_LEN + FOREARM_LEN));
-    limbs[(size_t)Limb::ThighL]    = spawn_limb(pe, re, img_thigh,     pos + glm::vec2(-HIP_X,      HIP_Y + THIGH_MID));
-    limbs[(size_t)Limb::LowerLegL] = spawn_limb(pe, re, img_lower_leg, pos + glm::vec2(-HIP_X,      HIP_Y + THIGH_LEN + LOWER_MID));
-    limbs[(size_t)Limb::FootL]     = spawn_limb(pe, re, img_foot,      pos + glm::vec2(-HIP_X,      HIP_Y + THIGH_LEN + LOWER_LEN));
-    limbs[(size_t)Limb::ThighR]    = spawn_limb(pe, re, img_thigh,     pos + glm::vec2( HIP_X,      HIP_Y + THIGH_MID));
-    limbs[(size_t)Limb::LowerLegR] = spawn_limb(pe, re, img_lower_leg, pos + glm::vec2( HIP_X,      HIP_Y + THIGH_LEN + LOWER_MID));
-    limbs[(size_t)Limb::FootR]     = spawn_limb(pe, re, img_foot,      pos + glm::vec2( HIP_X,      HIP_Y + THIGH_LEN + LOWER_LEN));
+    // Create joints from JSON definition
+    for (const auto& [jid, jc] : char_config.joints) {
+        auto jit  = JOINT_FROM_ID.find(jid);
+        auto plit = LIMB_FROM_ID.find(jc.parent_limb);
+        auto clit = LIMB_FROM_ID.find(jc.child_limb);
+        if (jit == JOINT_FROM_ID.end() || plit == LIMB_FROM_ID.end() || clit == LIMB_FROM_ID.end())
+            continue;
+        add_joint(pe, jit->second, plit->second, clit->second,
+                  jc.attach_parent, jc.attach_child, -1.f, jc.max_torque);
+    }
 
-    // Neck 
-    add_joint(pe, Joint::Neck,
-              Limb::Torso, Limb::Head,
-              {0.f, -TORSO_HALF_H}, {0.f, 4.f});
+    // Initialise goal angles from JSON defaults
+    joint_goal_angle.fill(0.f);
+    for (const auto& [jid, jc] : char_config.joints) {
+        auto jit = JOINT_FROM_ID.find(jid);
+        if (jit != JOINT_FROM_ID.end())
+            joint_goal_angle[(size_t)jit->second] = jc.default_angle;
+    }
 
-    // Left arm
-    add_joint(pe, Joint::ShoulderL,
-              Limb::Torso,     Limb::UpperArmL,
-              {-SHOULDER_X, SHOULDER_Y}, {0.f, -UPPER_ARM_MID});
-    add_joint(pe, Joint::ElbowL,
-              Limb::UpperArmL, Limb::ForearmL,
-              {0.f, UPPER_ARM_MID}, {0.f, -FOREARM_MID});
-    add_joint(pe, Joint::WristL,
-              Limb::ForearmL,  Limb::HandL,
-              {0.f, FOREARM_MID}, {0.f, 0.f});
-
-    // Right arm
-    add_joint(pe, Joint::ShoulderR,
-              Limb::Torso,     Limb::UpperArmR,
-              {SHOULDER_X, SHOULDER_Y}, {0.f, -UPPER_ARM_MID});
-    add_joint(pe, Joint::ElbowR,
-              Limb::UpperArmR, Limb::ForearmR,
-              {0.f, UPPER_ARM_MID}, {0.f, -FOREARM_MID});
-    add_joint(pe, Joint::WristR,
-              Limb::ForearmR,  Limb::HandR,
-              {0.f, FOREARM_MID}, {0.f, 0.f});
-
-    // Left leg
-    add_joint(pe, Joint::HipL,
-              Limb::Torso,    Limb::ThighL,
-              {-HIP_X, HIP_Y}, {0.f, -THIGH_MID});
-    add_joint(pe, Joint::KneeL,
-              Limb::ThighL,    Limb::LowerLegL,
-              {0.f, THIGH_MID}, {0.f, -LOWER_MID});
-    add_joint(pe, Joint::AnkleL,
-              Limb::LowerLegL, Limb::FootL,
-              {0.f, LOWER_MID}, {0.f, 0.f});
-
-    // Right leg
-    add_joint(pe, Joint::HipR,
-              Limb::Torso,    Limb::ThighR,
-              {HIP_X, HIP_Y}, {0.f, -THIGH_MID});
-    add_joint(pe, Joint::KneeR,
-              Limb::ThighR,    Limb::LowerLegR,
-              {0.f, THIGH_MID}, {0.f, -LOWER_MID});
-    add_joint(pe, Joint::AnkleR,
-              Limb::LowerLegR, Limb::FootR,
-              {0.f, LOWER_MID}, {0.f, 0.f});
-
-    // render layers
-    for (Limb l : { Limb::ThighR, Limb::LowerLegR, Limb::FootR,
-                    Limb::UpperArmR, Limb::ForearmR, Limb::HandR })
-        pe.world.bodies[limbs[(size_t)l]].draw_layer = 1;
-    for (Limb l : { Limb::Torso, Limb::Head })
-        pe.world.bodies[limbs[(size_t)l]].draw_layer = 2;
-    for (Limb l : { Limb::ThighL, Limb::LowerLegL, Limb::FootL,
-                    Limb::UpperArmL, Limb::ForearmL, Limb::HandL })
-        pe.world.bodies[limbs[(size_t)l]].draw_layer = 3;
+    // Assign draw layers from JSON draw_order:
+    //   items before "torso" → layer 1, "torso"/"head" → layer 2, after "head" → layer 3
+    // layers are used to render certain parts of the body over others. these are fed into rendering draw layers
+    // for future reference, we will need to fit this into a larger layer system to allow for backgrounds / other layers
+    int layer = 1;
+    for (const auto& lid : char_config.draw_order) {
+        if (lid == "torso") layer = 2;
+        auto lit = LIMB_FROM_ID.find(lid);
+        if (lit != LIMB_FROM_ID.end()) {
+            uint32_t bid = limbs[(size_t)lit->second];
+            if (bid != INVALID)
+                pe.world.bodies[bid].draw_layer = layer;
+        }
+        if (lid == "head") layer = 3;
+    }
 }
 
 void PlayerCharacter::despawn(PhysicsEngine& pe)
 {
+    upright_timer_   = 0.f;
+    height_timer_    = 0.f;
+    low_speed_timer_ = 0.f;
     if (!is_valid()) return;
 
     for (auto* j : joint_ptrs)
@@ -205,6 +242,47 @@ void PlayerCharacter::despawn(PhysicsEngine& pe)
     for (uint32_t id : limbs)
         if (id != INVALID) pe.remove_body(id);
     limbs.fill(INVALID);
+}
+
+void PlayerCharacter::reset_to(PhysicsEngine& pe, glm::vec2 pos)
+{
+    if (!is_valid()) return;
+
+    auto offsets = char_config.compute_spawn_offsets();
+
+    for (const auto& [lid, offset] : offsets) {
+        auto lit = LIMB_FROM_ID.find(lid);
+        if (lit == LIMB_FROM_ID.end()) continue;
+        size_t idx = (size_t)lit->second;
+        if (limbs[idx] == INVALID) continue;
+        pe.set_position        (limbs[idx], pos + offset);
+        pe.set_rotation        (limbs[idx], 0.f);
+        pe.set_velocity        (limbs[idx], { 0.f, 0.f });
+        pe.set_angular_velocity(limbs[idx], 0.f);
+    }
+
+    left_step_goal  = pos + offsets.at("foot_l");
+    right_step_goal = pos + offsets.at("foot_r");
+    left_step_target        = left_step_goal;
+    right_step_target       = right_step_goal;
+    left_step_normal        = { 0.f, -1.f };
+    right_step_normal       = { 0.f, -1.f };
+    left_step_normal_target = { 0.f, -1.f };
+    right_step_normal_target= { 0.f, -1.f };
+
+    left_airborne  = false;
+    right_airborne = false;
+    stride_counter = 0.f;
+    jump_timer     = 0.f;
+    grounded       = false;
+    was_grounded   = false;
+    facing_dir     = 1.f;
+    upright_timer_   = 0.f;
+    height_timer_    = 0.f;
+    low_speed_timer_ = 0.f;
+    state_history   = {};
+    current_action  = {};
+    previous_action = {};
 }
 
 static std::pair<float,float> solve_leg_ik(glm::vec2 hip, glm::vec2 ankle_target,
@@ -239,40 +317,12 @@ void PlayerCharacter::handle_controls(PhysicsEngine& pe, float dt)
 
     uint32_t  torso_id  = limbs[(size_t)Limb::Torso];
     glm::vec2 torso_pos = pe.get_position(torso_id);
-    glm::vec2 torso_vel = pe.get_velocity(torso_id);
 
     {
         auto hit = pe.raycast(torso_pos, glm::vec2(0.f, 1.f), ground_check_dist, PLAYER_MASK);
         grounded = hit.has_value();
     }
 
-    if (grounded) {
-        auto apply_ground_spring = [&](glm::vec2 contact, bool airborne) {
-            if (airborne) return;
-            glm::vec2 delta = contact - torso_pos;
-            float dist = glm::length(delta);
-            if (dist > SPRING_MIN_DIST && dist < ground_spring_max_dist) {
-                glm::vec2 dir     = delta / dist;
-                float     rel_vel = glm::dot(torso_vel, dir);
-                pe.apply_force(torso_id,
-                    (ground_spring_k * (dist - ground_spring_rest_length)
-                     - ground_spring_damping * rel_vel) * dir);
-            }
-        };
-        apply_ground_spring(left_step_target,  left_airborne);
-        apply_ground_spring(right_step_target, right_airborne);
-    }
-
-    float target_vx     = move_dir * (walking ? walk_speed : max_speed);
-    float current_accel = grounded ? accel : air_accel;
-    pe.apply_force(torso_id, { (target_vx - torso_vel.x) * current_accel, 0.f });
-}
-
-void PlayerCharacter::update(PhysicsEngine& pe, float dt)
-{
-    handle_controls(pe, dt);
-    //animate(pe, dt);
-    capture_state(pe);
 }
 
 // Joint enum order → parent/child limb pairs (must match Joint enum in player_character.h)
@@ -293,13 +343,66 @@ static constexpr struct { Limb parent; Limb child; } JOINT_LIMBS[(size_t)Joint::
 };
 static_assert((size_t)Joint::Count == JOINT_COUNT, "JOINT_COUNT out of sync with Joint enum");
 
+void PlayerCharacter::update(PhysicsEngine& pe, float dt, bool apply_controls)
+{
+    if (apply_controls) {
+        handle_controls(pe, dt);
+        animate(pe, dt);
+    }
+    apply_joint_goals(pe);
+
+    // Righting torque: PD controller drives torso angle toward 0 (upright)
+    {
+        uint32_t torso_id = limbs[(size_t)Limb::Torso];
+        float angle = pe.get_rotation(torso_id);
+        angle = std::atan2(std::sin(angle), std::cos(angle)); // wrap to [-π, π]
+        float omega = pe.get_angular_velocity(torso_id);
+        float torque = -torso_upright_stiffness * angle - torso_upright_damping * omega;
+        pe.apply_torque(torso_id, torque);
+    }
+
+    // Advance animation frame 
+    const AnimationClip* clip = nullptr;
+    if (anim_state == PlayerAnimState::Standing) clip = &anim_standing;
+    if (clip && !clip->empty()) {
+        anim_frame += 1.f;
+        if (anim_frame >= float(clip->length))
+            anim_frame = 0.f;
+    }
+
+    capture_state(pe);
+
+    if (state_history.count > 0) {
+        const MovementState& cur = state_history.at(0);
+        if (std::abs(cur.torso_angle) < upright_angle_threshold)
+            upright_timer_ += dt;
+        else
+            upright_timer_ = 0.f;
+
+        if (cur.ground_dist < 9999.f && std::abs(cur.ground_dist - standing_height) < height_threshold)
+            height_timer_ += dt;
+        else
+            height_timer_ = 0.f;
+
+        if (std::abs(cur.torso_velocity.x) < low_speed_threshold)
+            low_speed_timer_ += dt;
+        else
+            low_speed_timer_ = 0.f;
+    }
+}
+
 void PlayerCharacter::apply_action(PhysicsEngine& pe, const Action& action)
 {
     if (!is_valid()) return;
-
-    for (size_t i = 0; i < (size_t)Limb::Count; ++i)
-        if (action.torques[i] != 0.f)
-            pe.apply_torque(limbs[i], action.torques[i]);
+    previous_action = current_action;
+    current_action  = action;
+    for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
+        if (i == (size_t)Joint::ShoulderL || i == (size_t)Joint::ElbowL || i == (size_t)Joint::WristL)
+            continue;
+        float goal = std::clamp(action.goal_angle_change[i], joint_angle_min[i], joint_angle_max[i]);
+        current_action.goal_angle_change[i] = goal;
+        joint_goal_angle[i] = goal;
+    }
 }
 
 void PlayerCharacter::capture_state(PhysicsEngine& pe)
@@ -314,34 +417,52 @@ void PlayerCharacter::capture_state(PhysicsEngine& pe)
     s.jump                   = jump;
     s.aim_pos                = aim_pos;
     s.torso_velocity         = pe.get_velocity(torso_id);
-    s.torso_angle            = pe.get_rotation(torso_id);
+    float raw_angle          = pe.get_rotation(torso_id);
+    s.torso_angle            = std::atan2(std::sin(raw_angle), std::cos(raw_angle));
     s.torso_angular_velocity = pe.get_angular_velocity(torso_id);
 
     for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
-        float pa  = pe.get_rotation(limbs[(size_t)JOINT_LIMBS[i].parent]);
-        float ca  = pe.get_rotation(limbs[(size_t)JOINT_LIMBS[i].child]);
-        float rel = ca - pa;
-        s.joint_angles[i] = std::atan2(std::sin(rel), std::cos(rel));
+        float pa  = pe.get_rotation        (limbs[(size_t)JOINT_LIMBS[i].parent]);
+        float ca  = pe.get_rotation        (limbs[(size_t)JOINT_LIMBS[i].child]);
+        float pav = pe.get_angular_velocity(limbs[(size_t)JOINT_LIMBS[i].parent]);
+        float cav = pe.get_angular_velocity(limbs[(size_t)JOINT_LIMBS[i].child]);
+        float rel = pa - ca;
+        s.joint_angles[i]              = std::atan2(std::sin(rel), std::cos(rel));
+        s.joint_angular_velocities[i]  = pav - cav;
     }
 
-    s.grounded = grounded;
-
-    glm::vec2 torso_pos = pe.get_position(torso_id);
+    glm::vec2 torso_pos   = pe.get_position(torso_id);
     float     torso_angle = pe.get_rotation(torso_id);
     s.torso_pos = torso_pos;
 
-    auto wall_hit   = pe.raycast(torso_pos, glm::vec2(facing_dir, 0.f), wall_check_dist, PLAYER_MASK);
-    s.wall_ahead    = wall_hit.has_value();
+    auto wall_hit = pe.raycast(torso_pos, glm::vec2(facing_dir, 0.f), wall_check_dist, PLAYER_MASK);
+    s.wall_ahead  = wall_hit.has_value();
 
     auto ground_hit = pe.raycast(torso_pos, glm::vec2(0.f, 1.f), 300.f, PLAYER_MASK);
     s.ground_dist   = ground_hit.has_value() ? ground_hit.value().distance : 9999.f;
+    s.grounded      = ground_hit.has_value() && s.ground_dist <= ground_check_dist;
 
     s.left_shoulder_pos = torso_pos + glm::rotate(glm::vec2(-SHOULDER_X, SHOULDER_Y), torso_angle);
     s.left_arm_angle    = pe.get_rotation(limbs[(size_t)Limb::UpperArmL]);
+    s.facing_dir        = facing_dir;
+    glm::vec2 foot_l_pos = pe.get_position(limbs[(size_t)Limb::FootL]);
+    glm::vec2 foot_r_pos = pe.get_position(limbs[(size_t)Limb::FootR]);
+    s.feet_mid_x        = (foot_l_pos.x + foot_r_pos.x) * 0.5f;
+    s.feet_mid_y        = (foot_l_pos.y + foot_r_pos.y) * 0.5f;
+
+    for (uint32_t i = 0; i < (uint32_t)Limb::Count; ++i) {
+        if (limbs[i] != INVALID)
+            s.limb_velocities[i] = pe.get_velocity(limbs[i]);
+        else
+            s.limb_velocities[i] = { 0.f, 0.f };
+    }
+
+    get_anim_goals(s.anim_goal_current, s.anim_goal_next);
 
     state_history.push(s);
 }
 
+// RL reward system for teaching controls. Does not work very well with the existing rewards
 float PlayerCharacter::compute_reward(float dt) const
 {
     if (state_history.count == 0) return 0.f;
@@ -349,91 +470,161 @@ float PlayerCharacter::compute_reward(float dt) const
 
     float reward = reward_alive;
 
-    // forward velocity in the intended direction
-    reward += reward_velocity * cur.torso_velocity.x * cur.move_dir;
+    // 1. Height: how far the torso is above the ground (0 lying flat → 1 at standing_height)
+    if (cur.ground_dist < 9999.f)
+        reward += reward_height * std::min(1.f, cur.ground_dist / standing_height);
 
-    // penalise tipping and spinning
-    reward -= reward_upright     * std::abs(cur.torso_angle);
-    reward -= reward_angular_vel * std::abs(cur.torso_angular_velocity);
+    // 2. Upright: cos(torso_angle), 1 vertical → 0 horizontal → negative upside-down
+    reward += reward_upright * std::max(0.f, std::cos(cur.torso_angle));
 
-    // bonus for staying grounded while moving
-    if (cur.grounded && cur.move_dir != 0.f)
-        reward += reward_grounded_move;
+    // 3. Feet below torso (Y increases downward, so positive diff = feet below torso)
+    float feet_below = cur.feet_mid_y - cur.torso_pos.y;
+    reward += reward_feet_below * std::min(1.f, std::max(0.f, feet_below / standing_height));
 
-    // reward upward velocity arriving jump_frame_delay frames after a jump input
-    if (state_history.count > jump_frame_delay) {
-        const MovementState& past = state_history.at(jump_frame_delay);
-        if (past.jump)
-            reward += reward_jump_vel * (-cur.torso_velocity.y); // y-down, so negate for upward
+    // 3b. Feet horizontally near torso
+    float feet_dx = std::abs(cur.feet_mid_x - cur.torso_pos.x);
+    reward += reward_feet_near_x * std::max(0.f, 1.f - feet_dx / feet_near_x_threshold);
+
+    // 4. Velocity penalty: linear and angular separately
+    reward -= penalty_velocity   * glm::dot(cur.torso_velocity, cur.torso_velocity);
+    reward -= penalty_torso_spin * cur.torso_angular_velocity * cur.torso_angular_velocity;
+
+    // 5. Action smoothness: penalize rapid changes in joint goal angles
+    {
+        float total = 0.f;
+        for (int i = 0; i < (int)JOINT_COUNT; ++i) {
+            float d = current_action.goal_angle_change[i] - previous_action.goal_angle_change[i];
+            float d2 = d * d;
+            total += d2 * d2;
+        }
+        reward -= penalty_action_rate * total;
     }
 
-    // penalise deviation from the target standing height
-    if (cur.ground_dist < 9999.f)
-        reward -= reward_standing_height * std::abs(cur.ground_dist - standing_height);
+    // 7. Joint limit penalty: count joints beyond threshold
+    for (int i = 0; i < (int)JOINT_COUNT; ++i)
+        if (std::abs(cur.joint_angles[i]) > joint_limit_threshold)
+            reward -= penalty_joint_limit;
 
-    // reward left arm pointing toward aim_pos (cosine similarity, peak = 1 when aligned)
+    // 8. Animation conformance: reward joint angles matching current clip frame
     {
-        glm::vec2 to_aim = cur.aim_pos - cur.left_shoulder_pos;
-        if (glm::length(to_aim) > 0.001f) {
-            // game angle convention: atan2(-x, y) gives 0 pointing down, matching body rotations
-            float desired = std::atan2(-to_aim.x, to_aim.y);
-            float err     = cur.left_arm_angle - desired;
-            err = std::atan2(std::sin(err), std::cos(err)); // normalise to [-pi, pi]
-            reward += reward_arm_aim * std::cos(err);
+        float total = 0.f;
+        int   count = 0;
+        for (int i = 0; i < (int)JOINT_COUNT; ++i) {
+            if (!joint_animatable[i]) continue;
+            float err   = cur.joint_angles[i] - cur.anim_goal_current[i];
+            // Wrap error into [-π, π]
+            err = std::atan2(std::sin(err), std::cos(err));
+            float prox = std::max(0.f, 1.f - std::abs(err) / 1.5708f);
+            total += prox;
+            ++count;
         }
+        if (count > 0)
+            reward += reward_anim_match * total / float(count);
     }
 
     return reward;
+}
+
+void PlayerCharacter::get_anim_goals(std::array<float, JOINT_COUNT>& current_out,
+                                      std::array<float, JOINT_COUNT>& next_out) const
+{
+    current_out.fill(0.f);
+    next_out.fill(0.f);
+
+    const AnimationClip* clip = nullptr;
+    if (anim_state == PlayerAnimState::Standing) clip = &anim_standing;
+    if (!clip || clip->empty()) return;
+
+    float next_frame = std::fmod(anim_frame + 1.f, float(clip->length));
+
+    auto fill = [&](float frame, std::array<float, JOINT_COUNT>& out) {
+        for (const auto& [jid, angle] : clip->sample(frame)) {
+            auto it = JOINT_FROM_ID.find(jid);
+            if (it != JOINT_FROM_ID.end())
+                out[(size_t)it->second] = angle;
+        }
+    };
+    fill(anim_frame,  current_out);
+    fill(next_frame,  next_out);
+}
+
+void PlayerCharacter::animate_left_arm(PhysicsEngine& pe)
+{
+    if (!is_valid()) return;
+    glm::vec2 torso_pos   = pe.get_position(limbs[(size_t)Limb::Torso]);
+    float     torso_angle = pe.get_rotation(limbs[(size_t)Limb::Torso]);
+
+    glm::vec2 shoulder_l = torso_pos + glm::rotate(glm::vec2(-SHOULDER_X, SHOULDER_Y), torso_angle);
+
+    // Project a virtual target far along the shoulder→mouse direction (avoid weird IK arm angles)
+    glm::vec2 raw_dir = aim_pos - shoulder_l;
+    float     raw_len = glm::length(raw_dir);
+    glm::vec2 aim_dir = (raw_len > 0.001f) ? raw_dir / raw_len : glm::vec2(1.f, 0.f);
+    glm::vec2 virtual_target = shoulder_l + aim_dir * 500.f;
+
+    auto [ua, fa] = solve_arm_ik(shoulder_l, virtual_target);
+
+    float target_shoulder = torso_angle - ua;
+    float target_elbow    = ua - fa;
+
+    float max_delta = arm_angle_speed * pe.world.last_dt;
+    auto step = [&](float& tracked, Joint jnt, float target) {
+        float diff = std::atan2(std::sin(target - tracked), std::cos(target - tracked));
+        tracked += std::clamp(diff, -max_delta, max_delta);
+        joint_goal_angle[(size_t)jnt] = tracked;
+    };
+
+    step(arm_shoulder_rest, Joint::ShoulderL, target_shoulder);
+    step(arm_elbow_rest,    Joint::ElbowL,    target_elbow);
+    step(arm_wrist_rest,    Joint::WristL,    0.f);
+}
+
+void PlayerCharacter::apply_joint_goals(PhysicsEngine& /*pe*/)
+{
+    if (!is_valid()) return;
+    for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
+        if (!joint_ptrs[i]) continue;
+        float goal = joint_limited[i]
+                   ? std::clamp(joint_goal_angle[i], joint_angle_min[i], joint_angle_max[i])
+                   : joint_goal_angle[i];
+        joint_ptrs[i]->rest_angle   = goal;
+        joint_ptrs[i]->stiffness[2] = joint_bend_stiffness;
+    }
 }
 
 void PlayerCharacter::animate(PhysicsEngine& pe, float dt)
 {
     if (!is_valid()) return;
 
-    glm::vec2 air_normal = glm::normalize(glm::vec2(facing_dir * AIR_NORMAL_TILT, -1.0f));
-
-    if (grounded && !was_grounded) {
-        auto snap = [&](bool right) {
-            auto hit = get_standing_step(pe, right);
-            if (!hit.has_value()) return;
-            glm::vec2 pt = hit.value().point;
-            glm::vec2 n  = hit.value().normal;
-            if (right) {
-                right_step_target = pt; right_step_goal = pt;
-                right_step_normal = n;  right_step_normal_target = n;
-                right_airborne = false;
-            } else {
-                left_step_target = pt; left_step_goal = pt;
-                left_step_normal = n;  left_step_normal_target = n;
-                left_airborne = false;
-            }
-        };
-        snap(false);
-        snap(true);
-    }
-    was_grounded = grounded;
-
-    if (grounded)
-        update_grounded(pe, dt, air_normal);
-    else
-        update_airborne(pe, air_normal);
-
-    interpolate_steps(dt);
-
     glm::vec2 torso_pos   = pe.get_position(limbs[(size_t)Limb::Torso]);
     float     torso_angle = pe.get_rotation(limbs[(size_t)Limb::Torso]);
 
-    facing_dir = (aim_pos.x > torso_pos.x) ? 1.f : -1.f;
-    for (uint32_t id : limbs)
-        if (id != INVALID) pe.world.bodies[id].flip_h = !(facing_dir > 0.f);
+    // TODO: fix direction facing
+    // facing_dir = (aim_pos.x > torso_pos.x) ? 1.f : -1.f;
+    // for (uint32_t id : limbs)
+    //    if (id != INVALID) pe.world.bodies[id].flip_h = !(facing_dir > 0.f);
 
-    set_rest_angle(Joint::Neck, torso_angle, torso_angle);
-
-    animate_legs(pe, dt, torso_pos, torso_angle);
     animate_arms(pe, torso_pos, torso_angle);
+    test_animate(pe);
+}
 
-    DebugDraw::get().point(left_step_goal,  4.f, 0x00FF00FF);
-    DebugDraw::get().point(right_step_goal, 4.f, 0xFF0000FF);
+void PlayerCharacter::test_animate(PhysicsEngine& pe)
+{
+    if (!is_valid()) return;
+
+    const AnimationClip* clip = (anim_state == PlayerAnimState::Standing) ? &anim_standing : nullptr;
+    if (!clip || clip->empty()) return;
+
+    for (const auto& [jid, angle] : clip->sample(anim_frame)) {
+        auto it = JOINT_FROM_ID.find(jid);
+        if (it == JOINT_FROM_ID.end()) continue;
+
+        Joint jnt = it->second;
+        if (jnt == Joint::ShoulderL || jnt == Joint::ElbowL || jnt == Joint::WristL)
+            continue;
+
+        joint_goal_angle[(size_t)jnt] = angle;
+    }
 }
 
 void PlayerCharacter::update_grounded(PhysicsEngine& pe, float dt, glm::vec2 air_normal)
@@ -616,24 +807,9 @@ void PlayerCharacter::animate_legs(PhysicsEngine& pe, float dt, glm::vec2 torso_
     animate_leg_fk(Joint::HipR, Joint::KneeR, Joint::AnkleR, torso_angle, thigh_angle_r, lower_angle_r, foot_angle_r);
 }
 
-void PlayerCharacter::animate_arms(PhysicsEngine& pe, glm::vec2 torso_pos, float torso_angle)
+void PlayerCharacter::animate_arms(PhysicsEngine& pe, glm::vec2, float)
 {
-    glm::vec2 shoulder_r = torso_pos + glm::rotate(glm::vec2( SHOULDER_X, SHOULDER_Y), torso_angle);
-    glm::vec2 shoulder_l = torso_pos + glm::rotate(glm::vec2(-SHOULDER_X, SHOULDER_Y), torso_angle);
-
-    auto [ua_angle_r, fa_angle_r] = solve_arm_ik(shoulder_r, aim_pos);
-    set_rest_angle(Joint::ShoulderR, torso_angle, ua_angle_r);
-    set_rest_angle(Joint::ElbowR,    ua_angle_r,  fa_angle_r);
-    set_rest_angle(Joint::WristR,    fa_angle_r,  fa_angle_r);
-
-    glm::vec2 elbow_r = shoulder_r + glm::rotate(glm::vec2(0.f, UPPER_ARM_LEN), ua_angle_r);
-    glm::vec2 fa_r    = elbow_r    + glm::rotate(glm::vec2(0.f, FOREARM_MID),   fa_angle_r);
-    glm::vec2 grab_r  = glm::mix(elbow_r, fa_r, GRAB_BLEND);
-
-    auto [ua_angle_l, fa_angle_l] = solve_arm_ik(shoulder_l, grab_r);
-    set_rest_angle(Joint::ShoulderL, torso_angle, ua_angle_l);
-    set_rest_angle(Joint::ElbowL,    ua_angle_l,  fa_angle_l);
-    set_rest_angle(Joint::WristL,    fa_angle_l,  fa_angle_r);
+    animate_left_arm(pe);
 }
 
 std::optional<RaycastHit> PlayerCharacter::select_next_step(PhysicsEngine& pe, bool right, float x_offset)

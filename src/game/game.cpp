@@ -25,7 +25,7 @@ void Game::init() {
 
     ball_image = load_body_image("../assets/physics/ball.png");
     cshape     = load_body_image("../assets/physics/slope.png");
-    star       = load_body_image("../assets/physics/boom.png");
+    star       = load_body_image("../assets/physics/star.png");
 
     physics_engine.init(&engine);
     engine.physics_engine = &physics_engine;
@@ -133,8 +133,11 @@ void Game::run() {
             }
         }
 
-        if (input.blou(InputManager::InputType::FORWARD)) {
-            scene_manager.spawn_body(ball_image, physics_mouse());
+        if (input.blou(InputManager::InputType::FORWARD) && lastSpawn > 5) {
+            uint32_t id = scene_manager.spawn_body(ball_image, physics_mouse());
+            lastSpawn = 0;
+        } else if (input.blou(InputManager::InputType::BACKWARD) && lastSpawn > 5) {
+            uint32_t id = scene_manager.spawn_body(star, physics_mouse());
             lastSpawn = 0;
         } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 5) {
             // scene_manager.spawn_body(cshape, physics_mouse());
