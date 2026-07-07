@@ -547,11 +547,9 @@ void PhysicsEngine::dispatch(VkCommandBuffer cmd, float dt)
         vkCmdDispatch(cmd, (PHYSICS_WIDTH + 7) / 8, (PHYSICS_HEIGHT + 7) / 8, 1);
     }
 
-    // Particle physics: reads velocity_image for grid boundary conditions.
-    particle_sim.dispatch_physics(cmd, dt);
-
-    // Particle rendering draws on top of rigid bodies.
-    particle_sim.dispatch_render(cmd);
+    // MPM particle sim disabled for now.
+    // particle_sim.dispatch_physics(cmd, dt);
+    // particle_sim.dispatch_render(cmd);
 }
 
 void PhysicsEngine::run_coloring()

@@ -247,6 +247,17 @@ void ParticleSim::clear_particles()
     particle_count_ = 0;
 }
 
+void ParticleSim::destroy_particles_in_radius(glm::vec2 center, float radius)
+{
+    auto* buf = static_cast<Particle*>(particle_buf.info.pMappedData);
+    float r2 = radius * radius;
+    for (uint32_t i = 0; i < particle_count_; i++) {
+        glm::vec2 d = buf[i].position - center;
+        if (glm::dot(d, d) <= r2)
+            buf[i].enabled = 0.f;
+    }
+}
+
 // ─── dispatch_physics ─────────────────────────────────────────────────────────
 
 void ParticleSim::dispatch_physics(VkCommandBuffer cmd, float dt)

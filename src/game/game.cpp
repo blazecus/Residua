@@ -23,7 +23,7 @@ void Game::init() {
 
     engine.init({ settings.window_width, settings.window_height }, _window);
 
-    ball_image = load_body_image("../assets/physics/ball.png");
+    ball_image = load_body_image("../assets/physics/boom.png");
     cshape     = load_body_image("../assets/physics/slope.png");
     star       = load_body_image("../assets/physics/star.png");
 
@@ -34,7 +34,7 @@ void Game::init() {
     ui_manager.init(&scene_manager, &physics_engine, &engine);
     engine.ui_callback = [this]() { ui_manager.draw(); };
 
-    scene_manager.load(3);
+    scene_manager.load(0);
 
     lastFrame = std::chrono::system_clock::now();
 }
@@ -114,45 +114,31 @@ void Game::run() {
         scene_manager.apply_inputs(input, physics_mouse());
         scene_manager.update(delta);
 
-        // Spawn a cluster of liquid particles each frame the right mouse button is held.
+        // Destroy sprite pixels under the cursor while right mouse button is held.
         if (!ImGui::GetIO().WantCaptureMouse) {
             int mx, my;
             if (SDL_GetMouseState(&mx, &my) & SDL_BUTTON(SDL_BUTTON_RIGHT)) {
-                glm::vec2 centre = physics_mouse();
-                for (int i = -3; i <= 3; i++) {
-                    for (int j = -3; j <= 3; j++) {
-                        Particle p;
-                        p.position             = centre + glm::vec2(i, j);
-                        p.deformation_gradient = glm::mat2(1.f);
-                        p.color                = { 0.3f, 0.7f, 1.0f, 1.0f };
-                        p.liquid_density = 0.1f;
-                        p.volume = 1.0f;
-                        physics_engine.particle_sim.add_particle(p);
-                    }
-                }
+                physics_engine.destroy_pixels_in_radius(physics_mouse(), 2.f);
             }
         }
+        physics_engine.fracture_dirty_bodies();
 
-        if (input.blou(InputManager::InputType::FORWARD) && lastSpawn > 5) {
-            uint32_t id = scene_manager.spawn_body(ball_image, physics_mouse());
+        if (SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_P] && lastSpawn > 5) {
+            scene_manager.spawn_body(ball_image, physics_mouse());
             lastSpawn = 0;
-        } else if (input.blou(InputManager::InputType::BACKWARD) && lastSpawn > 5) {
-            uint32_t id = scene_manager.spawn_body(star, physics_mouse());
-            lastSpawn = 0;
-        } else if (input.blou(InputManager::InputType::JUMP) && lastSpawn > 5) {
-            // scene_manager.spawn_body(cshape, physics_mouse());
-            // lastSpawn = 0;
-        } else if (input.blou(InputManager::InputType::CROUCH) && lastSpawn > 10) {
-            // scene_manager.spawn_body(star, physics_mouse());
-            // lastSpawn = 0;
         }
 
-        if (input.blou(InputManager::InputType::INSPECT)) {
-            if (auto hit = physics_engine.body_at(physics_mouse())) {
-                if (physics_engine.world.bodies[*hit].inv_mass > 0.f) // rbs only
-                    physics_engine.remove_body(*hit);
-            }
+        if (SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_L] && lastSpawn > 5) {
+            scene_manager.spawn_body(cshape, physics_mouse());
+            lastSpawn = 0;
         }
+
+        // if (input.blou(InputManager::InputType::INSPECT)) {
+        //     if (auto hit = physics_engine.body_at(physics_mouse())) {
+        //         if (physics_engine.world.bodies[*hit].inv_mass > 0.f)
+        //             physics_engine.remove_body(*hit);
+        //     }
+        // }
 
         lastSpawn++;
 

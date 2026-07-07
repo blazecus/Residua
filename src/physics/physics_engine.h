@@ -6,6 +6,7 @@
 #include "../renderer/vk_descriptors.h"
 #include <optional>
 #include <vector>
+#include <unordered_map>
 #include <cstdint>
 #include <cmath>
 
@@ -197,6 +198,21 @@ public:
     // ── Collision queries ──────────────────────────────────────────────────────
     std::vector<ContactInfo> get_contacts(uint32_t id) const;
     bool                     is_touching (uint32_t a, uint32_t b) const;
+
+    void destroy_pixels_in_radius(glm::vec2 world_pos, float radius);
+    void fracture_dirty_bodies();
+
+    struct DirtyBodyInfo {
+        // Bounding box of erased pixels in sprite pixel coords (inclusive).
+        int px_min{ 1<<30}, py_min{ 1<<30};
+        int px_max{-(1<<30)}, py_max{-(1<<30)};
+        // Accumulated contributions of deleted pixels for incremental mass update.
+        // del_pos_sum / del_r2_sum use absolute sprite pixel space: center of pixel (px,py) = (px+0.5, py+0.5).
+        float     del_count{0.f};
+        glm::vec2 del_pos_sum{0.f};
+        float     del_r2_sum{0.f};   // sum of dot(p, p) for deleted pixel centers
+    };
+    std::unordered_map<uint32_t, DirtyBodyInfo> dirty_bodies_;
 
     // ── Raycasts ───────────────────────────────────────────────────────────────
     std::optional<RaycastHit>    raycast    (glm::vec2 origin, glm::vec2 dir, float max_dist,

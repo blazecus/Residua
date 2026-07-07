@@ -7,10 +7,13 @@
 
 struct RigidBody {
     LoadedBodyImage sprite;
-    std::vector<glm::vec2> shape;      
-    std::vector<float>     sdf;  
+    std::vector<glm::vec2> shape;
+    std::vector<float>     sdf;
     uint32_t sdf_w{0}, sdf_h{0};
     AABB unrotated_AABB;
+
+    // Body-pixel-space position of the deepest interior point
+    glm::vec2 thickest_px{0.f};
 
     glm::vec3 position{0.f};
     glm::vec3 initial{0.f};    
@@ -26,7 +29,8 @@ struct RigidBody {
     float    inv_mass{1.f};
     float    inv_inertia{1.f};
     float    friction{0.3f};
-    float    angular_damping{1.f};   
+    float    angular_damping{1.f};
+    float    fracture_threshold{0.f};  // |normal lambda| needed to fracture; 0 = unbreakable
 
     uint32_t collision_layer{0x00000001u};
     uint32_t collision_mask {0xFFFFFFFFu};

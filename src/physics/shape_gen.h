@@ -34,4 +34,15 @@ static constexpr uint32_t SDF_SCALE = 2;
 std::vector<float> generate_sdf(const LoadedBodyImage& img,
                                  const std::vector<glm::vec2>& shape_local,
                                  glm::vec2 com_local,
-                                 uint32_t scale = SDF_SCALE);
+                                 uint32_t scale = SDF_SCALE,
+                                 glm::vec2* out_thickest_px = nullptr // used in fracturing logic
+                                );
+
+// Recompute only the SDF cells in [px0..px1, py0..py1] (in SDF pixel coords).
+void patch_sdf_region(const LoadedBodyImage& img,
+                      const std::vector<glm::vec2>& shape_local,
+                      glm::vec2 com_local,
+                      uint32_t scale,
+                      uint32_t px0, uint32_t py0,
+                      uint32_t px1, uint32_t py1,
+                      std::vector<float>& sdf);

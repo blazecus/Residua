@@ -345,6 +345,7 @@ static_assert((size_t)Joint::Count == JOINT_COUNT, "JOINT_COUNT out of sync with
 
 void PlayerCharacter::update(PhysicsEngine& pe, float dt, bool apply_controls)
 {
+    if (!is_valid()) return;
     if (apply_controls) {
         handle_controls(pe, dt);
         animate(pe, dt);

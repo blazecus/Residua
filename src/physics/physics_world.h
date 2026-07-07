@@ -25,6 +25,12 @@ struct PhysicsStats {
     uint32_t gpu_contacts  { 0 };
 };
 
+struct FractureEvent {
+    uint32_t  body_id;
+    glm::vec2 contact_world;
+    float     impulse;  // |normal lambda| that triggered fracture
+};
+
 struct PhysicsWorld {
     float gravity   { 200.f };
     float alpha     { AVBD_ALPHA };
@@ -48,8 +54,10 @@ struct PhysicsWorld {
 
     std::vector<uint32_t> lbvh_index_map; // box index → body index, valid after prepare()
 
-    std::vector<uint32_t> colors;
-    uint32_t              max_color{0};
+    std::vector<uint32_t>   colors;
+    uint32_t                max_color{0};
+
+    std::vector<FractureEvent> pending_fractures;
 
     uint32_t    add_body(RigidBody& rb);
     uint32_t    add_static_rect(glm::vec2 center, float w, float h);

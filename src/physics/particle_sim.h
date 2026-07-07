@@ -93,6 +93,7 @@ public:
 
     void add_particle(const Particle& p);
     void clear_particles();
+    void destroy_particles_in_radius(glm::vec2 center, float radius);
 
     void dispatch_physics(VkCommandBuffer cmd, float dt);
 

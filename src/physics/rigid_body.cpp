@@ -21,7 +21,7 @@ void RigidBody::generate_shape() {
 }
 
 void RigidBody::generate_sdf() {
-    sdf   = ::generate_sdf(sprite, shape, com_local, SDF_SCALE);
+    sdf   = ::generate_sdf(sprite, shape, com_local, SDF_SCALE, &thickest_px);
     sdf_w = sprite.width  * SDF_SCALE;
     sdf_h = sprite.height * SDF_SCALE;
 }

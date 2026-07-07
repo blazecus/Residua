@@ -59,7 +59,8 @@ uint32_t SceneManager::spawn_body(const LoadedBodyImage& img, glm::vec2 world_po
     rb.compute_mass_properties();
     rb.generate_shape();
     rb.generate_sdf();
-    rb.position = glm::vec3(world_pos, 0.f);
+    rb.position            = glm::vec3(world_pos, 0.f);
+    rb.fracture_threshold  = 10000000.f;
     return physics->add_body(engine, std::move(rb));
 }
 

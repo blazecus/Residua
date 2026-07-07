@@ -266,7 +266,8 @@ std::vector<glm::vec2> generate_shape(
 std::vector<float> generate_sdf(const LoadedBodyImage& img,
                                  const std::vector<glm::vec2>& shape_local,
                                  glm::vec2 com_local,
-                                 uint32_t scale)
+                                 uint32_t scale,
+                                 glm::vec2* out_thickest_px)
 {
     uint32_t sw = img.width;
     uint32_t sh = img.height;
@@ -289,6 +290,9 @@ std::vector<float> generate_sdf(const LoadedBodyImage& img,
     int ns = (int)shape_local.size();
 
     std::vector<float> sdf(W * H);
+    bool     has_thickest  = false;
+    float    thickest_val  = 0.f;
+    uint32_t thickest_idx  = 0;
     for (uint32_t py = 0; py < H; py++) {
         for (uint32_t px = 0; px < W; px++) {
             glm::vec2 p{ px + 0.5f, py + 0.5f };
@@ -308,9 +312,74 @@ std::vector<float> generate_sdf(const LoadedBodyImage& img,
 
             float dist = std::sqrt(min_d2);
             uint32_t idx = py * W + px;
-            sdf[idx] = inside[idx] ? -dist : dist;
+            bool solid = inside[idx];
+            float val = solid ? -dist : dist;
+            sdf[idx] = val;
+
+            // Track the deepest interior cell 
+            if (solid && (!has_thickest || val < thickest_val)) {
+                has_thickest = true;
+                thickest_val = val;
+                thickest_idx = idx;
+            }
+        }
+    }
+
+    if (out_thickest_px) {
+        if (has_thickest) {
+            uint32_t tx = thickest_idx % W, ty = thickest_idx / W;
+            *out_thickest_px = { (tx + 0.5f) / sf, (ty + 0.5f) / sf };
+        } else {
+            *out_thickest_px = { sw * 0.5f, sh * 0.5f };
         }
     }
 
     return sdf;
+}
+
+void patch_sdf_region(const LoadedBodyImage& img,
+                      const std::vector<glm::vec2>& shape_local,
+                      glm::vec2 com_local,
+                      uint32_t scale,
+                      uint32_t px0, uint32_t py0,
+                      uint32_t px1, uint32_t py1,
+                      std::vector<float>& sdf)
+{
+    uint32_t sw = img.width;
+    uint32_t sh = img.height;
+    uint32_t W  = sw * scale;
+    uint32_t H  = sh * scale;
+    float    sf = (float)scale;
+
+    px0 = std::min(px0, W > 0 ? W - 1 : 0u);
+    py0 = std::min(py0, H > 0 ? H - 1 : 0u);
+    px1 = std::min(px1, W > 0 ? W - 1 : 0u);
+    py1 = std::min(py1, H > 0 ? H - 1 : 0u);
+
+    glm::vec2 img_offset(W * 0.5f + com_local.x * sf, H * 0.5f + com_local.y * sf);
+    int ns = (int)shape_local.size();
+
+    for (uint32_t py = py0; py <= py1; py++) {
+        uint32_t oy = std::min(py / scale, sh - 1);
+        for (uint32_t px = px0; px <= px1; px++) {
+            uint32_t ox = std::min(px / scale, sw - 1);
+            bool inside = img.pixels[oy * sw + ox].w > 0.5f;
+
+            glm::vec2 p{ (float)px + 0.5f, (float)py + 0.5f };
+            float min_d2 = std::numeric_limits<float>::max();
+            for (int i = 0; i < ns; i++) {
+                glm::vec2 a  = shape_local[i]            * sf + img_offset;
+                glm::vec2 b  = shape_local[(i + 1) % ns] * sf + img_offset;
+                glm::vec2 ab = b - a;
+                float     len2 = glm::dot(ab, ab);
+                float     t    = (len2 > 1e-12f)
+                                 ? glm::clamp(glm::dot(p - a, ab) / len2, 0.f, 1.f)
+                                 : 0.f;
+                glm::vec2 diff = p - (a + t * ab);
+                min_d2 = std::min(min_d2, glm::dot(diff, diff));
+            }
+
+            sdf[py * W + px] = inside ? -std::sqrt(min_d2) : std::sqrt(min_d2);
+        }
+    }
 }

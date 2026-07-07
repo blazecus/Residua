@@ -69,6 +69,9 @@ set(RESIDUA_COMMON_SOURCES
   src/physics/particle_sim.cpp
   src/physics/particle_sim.h
   src/physics/physics_api.cpp
+  src/physics/fracture.cpp
+  src/physics/neighborhood_disconnector.cpp
+  src/physics/neighborhood_disconnector.h
   src/game/player/character_config.h
   src/game/player/character_config.cpp
   src/game/player/animation_clip.h

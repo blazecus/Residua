@@ -226,6 +226,33 @@ void PhysicsWorld::solve(float dt) {
     iterate(dt);
     auto t3 = std::chrono::system_clock::now();
 
+    // Detect fracture events: scan manifolds for contacts whose normal force
+    // (|lambda[normal]|) exceeds a body's fracture_threshold.
+    for (auto& f : forces) {
+        if (!f->is_contact()) continue;
+        auto* m = dynamic_cast<Manifold*>(f.get());
+        if (!m || m->numContacts == 0) continue;
+
+        const RigidBody& ba = bodies[m->bodyA];
+        const RigidBody& bb = bodies[m->bodyB];
+        bool check_a = ba.fracture_threshold > 0.f && ba.inv_mass != 0.f;
+        bool check_b = bb.fracture_threshold > 0.f && bb.inv_mass != 0.f;
+        if (!check_a && !check_b) continue;
+
+        for (int i = 0; i < m->numContacts; i++) {
+            float fn = std::abs(m->lambda[i * 2 + 0]);
+            if (fn < 1.f) continue;
+
+            glm::vec2 rAW = glm::rotate(m->contacts[i].rA, ba.position.z);
+            glm::vec2 contact_world = glm::vec2(ba.position) + rAW;
+
+            if (check_a && fn > ba.fracture_threshold)
+                pending_fractures.push_back({m->bodyA, contact_world, fn});
+            if (check_b && fn > bb.fracture_threshold)
+                pending_fractures.push_back({m->bodyB, contact_world, fn});
+        }
+    }
+
     stats.warmstart_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.f;
     stats.predict_ms   = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count() / 1000.f;
     stats.solver_ms    = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count() / 1000.f;
