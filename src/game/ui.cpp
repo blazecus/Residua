@@ -58,19 +58,8 @@ void UIManager::draw() {
     PlayerCharacter& player = scenes->player;
     if (player.is_valid()) {
         ImGui::Begin("Player");
-        ImGui::SliderFloat("Step time",        &player.step_time,           0.05f, 1.f);
-        ImGui::SliderFloat("Step length",      &player.step_length_test,    0.f,   200.f);
-        ImGui::SliderFloat("Leg angle speed",  &player.max_leg_angle_speed,  1.f,  50.f);
-        ImGui::SliderFloat("Bend stiffness", &player.joint_bend_stiffness, 0.f, 50000.f);
-        ImGui::SeparatorText("Jump");
-        ImGui::SliderFloat("Air accel",            &player.air_accel,                  0.f,  5000.f);
-        ImGui::SliderFloat("Ground check dist",    &player.ground_check_dist,          0.f,   200.f);
-        ImGui::SliderFloat("Airborne dist",        &player.jump_airborne_dist,         0.f,   100.f);
-        ImGui::SeparatorText("State");
-        if (player.state_history.full()) {
-            const MovementState& st = player.state_history.at(0);
-            ImGui::Text("Ground dist:   %.2f  (goal: %.2f)", st.ground_dist, player.standing_height);
-        }
+        ImGui::SliderFloat("Thrust force", &player.thrust_force, 0.f, 100000.f);
+        ImGui::SliderFloat("Rotate speed", &player.rotate_speed, 0.f, 10.f);
         ImGui::End();
     }
 

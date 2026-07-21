@@ -14,12 +14,11 @@ struct SceneEntry {
 };
 
 static constexpr SceneEntry SCENE_LIST[] = {
+    { "Space",       "../assets/scenes/space.scene"        },
     { "Rope",        "../assets/scenes/spring_chain.scene" },
     { "Free Play",   "../assets/scenes/free_play.scene"    },
     { "Softbody",    "../assets/scenes/softbody.scene"     },
-    { "Player Test", "../assets/scenes/player_test.scene"  },
     { "Long Level",  "../assets/scenes/long_level.scene"   },
-    { "Training",    "../assets/scenes/training.scene"     },
 };
 static constexpr int NUM_SCENES = sizeof(SCENE_LIST) / sizeof(SCENE_LIST[0]);
 
@@ -44,8 +43,8 @@ struct SceneManager {
 
     void clear();
     void load(int idx);
-    void apply_inputs(const InputManager::Inputs& inputs, glm::vec2 aim_pos);
-    void update(float dt, bool apply_controls = true);
+    void apply_inputs(const InputManager::Inputs& inputs);
+    void update(float dt);
 
     uint32_t spawn_body(const LoadedBodyImage& img, glm::vec2 world_pos);
 

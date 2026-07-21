@@ -111,7 +111,7 @@ void Game::run() {
 
         DebugDraw::get().clear();
         client.update();
-        scene_manager.apply_inputs(input, physics_mouse());
+        scene_manager.apply_inputs(input);
         scene_manager.update(delta);
 
         // Destroy sprite pixels under the cursor while right mouse button is held.

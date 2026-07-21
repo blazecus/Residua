@@ -72,16 +72,8 @@ set(RESIDUA_COMMON_SOURCES
   src/physics/fracture.cpp
   src/physics/neighborhood_disconnector.cpp
   src/physics/neighborhood_disconnector.h
-  src/game/player/character_config.h
-  src/game/player/character_config.cpp
-  src/game/player/animation_clip.h
-  src/game/player/animation_clip.cpp
   src/game/player/player_character.h
   src/game/player/player_character.cpp
-  src/game/player/movement_state.h
-  src/game/player/movement_state.cpp
-  src/game/player/player_api.h
-  src/game/player/player_api.cpp
 )
 
 # ── Game executable ───────────────────────────────────────────────────────────
@@ -100,43 +92,6 @@ add_custom_command(TARGET Residua POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:Residua> $<TARGET_FILE_DIR:Residua>
   COMMAND_EXPAND_LISTS
 )
-
-# ── Python extension module ───────────────────────────────────────────────────
-set(Python3_FIND_REGISTRY NEVER)
-set(Python3_FIND_STRATEGY LOCATION)
-find_package(Python3 COMPONENTS Interpreter Development)
-
-if(Python3_FOUND)
-  include(FetchContent)
-  FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v2.13.6
-  )
-  FetchContent_MakeAvailable(pybind11)
-
-  pybind11_add_module(residua_py
-    src/game/py_env.h
-    src/game/py_env.cpp
-    src/game/residua_py.cpp
-    ${RESIDUA_COMMON_SOURCES}
-  )
-
-  set_property(TARGET residua_py PROPERTY CXX_STANDARD 20)
-  target_compile_definitions(residua_py PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
-  target_include_directories(residua_py PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-  target_link_libraries(residua_py PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui nlohmann_json::nlohmann_json)
-  target_precompile_headers(residua_py REUSE_FROM Residua)
-
-  add_custom_command(TARGET residua_py POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:residua_py> $<TARGET_FILE_DIR:residua_py>
-    COMMAND_EXPAND_LISTS
-  )
-
-  add_dependencies(residua_py Shaders)
-else()
-  message(STATUS "Python not found — skipping residua_py. Re-run cmake with -DPython3_EXECUTABLE=<path/to/python.exe>")
-endif()
 
 # ── Shader compilation ────────────────────────────────────────────────────────
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)

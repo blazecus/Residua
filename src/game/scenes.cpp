@@ -25,18 +25,16 @@ void SceneManager::clear() {
     current_scene = -1;
 }
 
-void SceneManager::apply_inputs(const InputManager::Inputs& inputs, glm::vec2 aim_pos)
+void SceneManager::apply_inputs(const InputManager::Inputs& inputs)
 {
     player.apply_inputs(
-        inputs.flou(InputManager::RIGHT) - inputs.flou(InputManager::LEFT),
-        inputs.blou(InputManager::CROUCH),
-        inputs.blou(InputManager::JUMP),
-        aim_pos
+        inputs.flou(InputManager::FORWARD),
+        inputs.flou(InputManager::RIGHT) - inputs.flou(InputManager::LEFT)
     );
 }
 
-void SceneManager::update(float dt, bool apply_controls) {
-    player.update(*physics, dt, apply_controls);
+void SceneManager::update(float dt) {
+    player.update(*physics, dt);
 
     if (player.is_valid()) {
         glm::vec2 ppos = player.position(*physics);
@@ -125,6 +123,7 @@ void SceneManager::load_file(const std::string& path) {
     camera_offset = {0.f, 0.f};
     world_w = 1e9f;
     world_h = 1e9f;
+    physics->world.gravity = 200.f;
 
     std::vector<uint32_t> body_idx;
     std::unordered_map<std::string, LoadedBodyImage> img_cache;
@@ -142,6 +141,7 @@ void SceneManager::load_file(const std::string& path) {
             auto f = parse_fields(ss);
             world_w = getf(f, "w", float(PHYSICS_WIDTH));
             world_h = getf(f, "h", float(PHYSICS_HEIGHT));
+            physics->world.gravity = getf(f, "gravity", 200.f);
         }
         else if (kw == "player") {
             auto f = parse_fields(ss);
@@ -180,6 +180,7 @@ void SceneManager::load_file(const std::string& path) {
             uint32_t mask   = getu(f, "mask",    0xFFFFFFFFu);
             float density   = getf(f, "density", 1.f);
             float ang_damp  = getf(f, "ang_damp", 1.f);
+            float fracture  = getf(f, "fracture", 0.f);
 
             if (img_path.empty()) continue;
             auto it = img_cache.find(img_path);
@@ -188,9 +189,10 @@ void SceneManager::load_file(const std::string& path) {
 
             bool is_static = (type == "sb");
             RigidBody rb = make_body(it->second, x, y, is_static, density);
-            rb.collision_layer = layer;
-            rb.collision_mask  = mask;
-            rb.angular_damping = ang_damp;
+            rb.collision_layer    = layer;
+            rb.collision_mask     = mask;
+            rb.angular_damping    = ang_damp;
+            rb.fracture_threshold = fracture;
             body_idx.push_back(physics->add_body(engine, std::move(rb)));
         }
         else if (kw == "wall") {

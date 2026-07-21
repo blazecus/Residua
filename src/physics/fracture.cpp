@@ -291,7 +291,7 @@ static std::vector<PixelComponent> partition_along_stroke(
     constexpr float JAG_FREQUENCY_1  = 1.f / 7.f;
     constexpr float JAG_AMPLITUDE_2  = 2.0f;
     constexpr float JAG_FREQUENCY_2  = 1.f / 3.f;
-    constexpr float STROKE_RADIUS    = 1.5f;  // half-width of the barrier stroke
+    constexpr float STROKE_RADIUS    = 0.75f; 
     glm::vec2 phase{ frand() * 1000.f, frand() * 1000.f };
 
     std::vector<uint8_t> barrier(bw * bh, 0);
