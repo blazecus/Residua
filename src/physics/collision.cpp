@@ -6,8 +6,9 @@
 
 static float sample_sdf(const RigidBody& body, glm::vec2 img_pos)
 {
-    float px = img_pos.x;
-    float py = img_pos.y;
+    // texel i stores the distance at its center, i + 0.5
+    float px = img_pos.x - 0.5f;
+    float py = img_pos.y - 0.5f;
 
     int x0 = (int)std::floor(px), y0 = (int)std::floor(py);
     int x1 = x0 + 1,  y1 = y0 + 1;

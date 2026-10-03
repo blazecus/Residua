@@ -15,9 +15,10 @@ AABB RigidBody::generate_AABB() {
 
 void RigidBody::generate_shape() {
     shape = ::generate_shape(sprite.width, sprite.height, sprite.pixels);
+    // Marching squares samples pixel x at x; everything else puts pixel x's center at x + 0.5
     glm::vec2 half(sprite.width * 0.5f, sprite.height * 0.5f);
     for (auto& v : shape)
-        v -= half + com_local;
+        v += glm::vec2(0.5f) - half - com_local;
 }
 
 void RigidBody::generate_sdf() {

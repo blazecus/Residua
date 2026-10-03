@@ -20,7 +20,7 @@ void SceneManager::init(PhysicsEngine* phys, ResiduaEngine* eng,
 }
 
 void SceneManager::clear() {
-    player.despawn(*physics);
+    player.despawn();
     physics->clear();
     current_scene = -1;
 }
@@ -36,10 +36,10 @@ void SceneManager::apply_inputs(const InputManager::Inputs& inputs, glm::vec2 ai
 }
 
 void SceneManager::update(float dt, bool apply_controls) {
-    player.update(*physics, dt, apply_controls);
+    player.update(dt, apply_controls);
 
     if (player.is_valid()) {
-        glm::vec2 ppos = player.position(*physics);
+        glm::vec2 ppos = player.position();
         float max_x = world_w - float(PHYSICS_WIDTH);
         float max_y = world_h - float(PHYSICS_HEIGHT);
         camera_offset.x = std::clamp(ppos.x - float(PHYSICS_WIDTH)  * 0.5f, 0.f, std::max(0.f, max_x));
@@ -60,7 +60,7 @@ uint32_t SceneManager::spawn_body(const LoadedBodyImage& img, glm::vec2 world_po
     rb.generate_shape();
     rb.generate_sdf();
     rb.position            = glm::vec3(world_pos, 0.f);
-    rb.fracture_threshold  = 10000000.f;
+    rb.fracture_threshold  = 100000000.f; // raised 10x -- bodies were fracturing too easily
     return physics->add_body(engine, std::move(rb));
 }
 

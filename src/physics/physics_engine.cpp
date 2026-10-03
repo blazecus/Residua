@@ -398,6 +398,33 @@ uint32_t PhysicsEngine::add_body(ResiduaEngine* engine, RigidBody body)
     return slot;
 }
 
+void PhysicsEngine::mirror_body_x(uint32_t idx)
+{
+    if (idx >= world.bodies.size() || !world.active[idx] || idx >= body_draw_info.size()) return;
+    RigidBody&   rb  = world.bodies[idx];
+    BodyGPUInfo& bdi = body_draw_info[idx];
+
+    // Sprite: both orientations are already on the GPU, so swapping the indices is enough
+    rb.sprite = flip_horizontal(rb.sprite);
+    std::swap(bdi.pixel_index, bdi.flipped_pixel_index);
+
+    rb.com_local.x   = -rb.com_local.x;
+    rb.thickest_px.x = (float)rb.sprite.width - rb.thickest_px.x;
+
+    // Collision polygon: mirror, then reverse to keep the original winding
+    for (glm::vec2& v : rb.shape) v.x = -v.x;
+    std::reverse(rb.shape.begin(), rb.shape.end());
+    uint32_t vert_count = std::min((uint32_t)rb.shape.size(), bdi.edge_count);
+    auto* vert_dst = static_cast<glm::vec2*>(body_verts_buf.info.pMappedData);
+    std::memcpy(vert_dst + bdi.edge_offset, rb.shape.data(), vert_count * sizeof(glm::vec2));
+
+    // SDF: texel i stores the distance at i + 0.5, so reversing each row is an exact mirror
+    for (uint32_t y = 0; y < rb.sdf_h; y++)
+        std::reverse(rb.sdf.begin() + y * rb.sdf_w, rb.sdf.begin() + (y + 1) * rb.sdf_w);
+    auto* sdf_dst = static_cast<float*>(sdf_data_buf.info.pMappedData);
+    std::memcpy(sdf_dst + bdi.sdf_offset, rb.sdf.data(), rb.sdf.size() * sizeof(float));
+}
+
 uint32_t PhysicsEngine::add_static_rect(ResiduaEngine* engine, glm::vec2 center, float w, float h)
 {
     uint32_t slot = world.add_static_rect(center, w, h);

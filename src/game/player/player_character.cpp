@@ -5,8 +5,8 @@
 #include <limits>
 #include <cmath>
 #include <fmt/core.h>
+#include <iostream>
 
-// ── JSON id → enum mappings ────────────────────────────────────────────────────
 static const std::unordered_map<std::string, Limb> LIMB_FROM_ID = {
     { "torso",       Limb::Torso      },
     { "head",        Limb::Head       },
@@ -40,56 +40,35 @@ static const std::unordered_map<std::string, Joint> JOINT_FROM_ID = {
     { "ankle_r",    Joint::AnkleR    },
 };
 
-static constexpr float TORSO_HALF_H      = 10.f;
-
 // ── Limb skeleton ---------------------------------────────────────────────────
-static constexpr float THIGH_LEN        = 10.f;
-static constexpr float THIGH_MID        =  5.f;
-static constexpr float LOWER_LEN        = 10.f;
-static constexpr float LOWER_MID        =  5.f;
-static constexpr float LOWER_TO_ANKLE   = 10.f;
-static constexpr float HIP_X            =  3.f;
+static constexpr float THIGH_LEN        =  8.f;
+static constexpr float LOWER_LEN        =  8.f;
+static constexpr float HIP_X            =  2.0f;
 static constexpr float HIP_Y            =  8.f;
 static constexpr float ANKLE_RAISE      =  1.f;
-static constexpr float FOOT_OFF_X       =  2.f;
-
-// ── Head / neck ───────────────────────────────────────────────────────────────
-static constexpr float NECK_Y           = -10.f;
-static constexpr float HEAD_Y           =  -4.f;
 
 // ── Arm skeleton ──────────────────────────────────────────────────────────────
-static constexpr float SHOULDER_X       =  4.f;
-static constexpr float SHOULDER_Y       = -8.f;
-static constexpr float UPPER_ARM_LEN    = 9.f;
-static constexpr float UPPER_ARM_MID    =  5.f;
-static constexpr float FOREARM_LEN      = 9.f;
-static constexpr float FOREARM_MID      =  5.f;
-static constexpr float GRAB_BLEND       =  0.5f;
-
-// ── Animation ─────────────────────────────────────────────────────────────────
-static constexpr float AIR_NORMAL_TILT   =  2.0f;
-static constexpr float INTERP_RUNNING    = 12.f;
-static constexpr float INTERP_OTHER      =  7.f;
-static constexpr float INTERP_AIR_MULT   =  3.f;
-static constexpr float AIRBORNE_RAY_DIST = 500.f;
-static constexpr float RUN_STEP_BASE_X   =  5.f;
-static constexpr float RUN_STEP_LEFT_OFF = 10.f;
-static constexpr float RUN_ARC_X         = 16.f;
-static constexpr float RUN_ARC_Y         =  5.f;
-static constexpr float WALK_STRIDE_RATE  =  1.5f;
+static constexpr float SHOULDER_X       =  3.f;
+static constexpr float SHOULDER_Y       = -6.f;
+static constexpr float UPPER_ARM_LEN    =  7.f;
+static constexpr float UPPER_ARM_MID    =  3.5f;
+static constexpr float FOREARM_LEN      =  7.f;
 
 // ── Step detection ────────────────────────────────────────────────────────────
 static constexpr float STEP_RAY_DIST      =  80.f;
-static constexpr float STEP_HEIGHT_THRESH =  20.f;
-static constexpr float STEP_HEIGHT_NUDGE  =  -3.f;
-static constexpr float STEP_VEL_MIN       =   0.1f;
-static constexpr float STEP_WALK_MULT     =   1.25f;
-static constexpr float STEP_RIGHT_EXTRA   =   5.f;
-static constexpr float STANDING_STEP_X    =  12.f;
-static constexpr float STANDING_ORIGIN_Y  =   3.f;
 
+static constexpr float MAX_JUMP_CUTOFF = 0.4f;
+static constexpr float MIN_JUMP_CUTOFF = 0.2f;
+static constexpr float JUMP_DELAY = 0.2f;
+static constexpr glm::vec2 JUMP_RATIO = {1.0f, 1.0f};
+static constexpr float JUMP_ANIMATION_LENGTH = 0.3f;
+static constexpr float LANDING_ANIMATION_LENGTH = 0.15f;
+static constexpr float AIRBORNE_DELAY = 0.1f;
 
-// ─────────────────────────────────────────────────────────────────────────────
+static float wrap_angle(float a)
+{
+    return std::atan2(std::sin(a), std::cos(a));
+}
 
 void PlayerCharacter::load_assets(const char* config_path)
 {
@@ -100,8 +79,6 @@ void PlayerCharacter::load_assets(const char* config_path)
     limb_images.clear();
     for (const auto& [id, sprite] : char_config.limb_sprites)
         limb_images[id] = load_body_image(("../" + sprite).c_str());
-
-    anim_standing.load("../assets/animations/standing.json");
 
     // Build animatable-joint mask and angle limits from character config
     joint_animatable.fill(false);
@@ -120,7 +97,7 @@ void PlayerCharacter::load_assets(const char* config_path)
     }
 }
 
-uint32_t PlayerCharacter::spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
+uint32_t PlayerCharacter::spawn_limb(ResiduaEngine& re,
                                       const LoadedBodyImage& img, glm::vec2 world_pos,
                                       float density)
 {
@@ -132,24 +109,24 @@ uint32_t PlayerCharacter::spawn_limb(PhysicsEngine& pe, ResiduaEngine& re,
     rb.position        = glm::vec3(world_pos, 0.f);
     rb.collision_layer = PLAYER_LAYER;
     rb.collision_mask  = PLAYER_MASK;
-    return pe.add_body(&re, std::move(rb));
+    return pe->add_body(&re, std::move(rb));
 }
 
-void PlayerCharacter::add_joint(PhysicsEngine& pe, Joint jnt, Limb parent, Limb child,
+void PlayerCharacter::add_joint(Joint jnt, Limb parent, Limb child,
                                  glm::vec2 rA_local, glm::vec2 rB_local,
                                  float /*bend_stiffness*/, float /*max_torque*/)
 {
     auto j = std::make_unique<DistanceJoint>(
-        &pe.world,
+        &pe->world,
         limbs[(size_t)parent], limbs[(size_t)child],
         rA_local, rB_local,
         std::numeric_limits<float>::infinity(),
-        joint_bend_stiffness);
+        1.f, 1.f, 1.f);
     joint_ptrs[(size_t)jnt] = j.get();
     bool left_arm = (jnt == Joint::ShoulderL || jnt == Joint::ElbowL || jnt == Joint::WristL);
     if (left_arm)
         j->angular_reaction = false;
-    pe.world.add_force(std::move(j));
+    pe->world.add_force(std::move(j));
 }
 
 void PlayerCharacter::set_rest_angle(Joint jnt, float parent_angle, float child_angle)
@@ -157,10 +134,13 @@ void PlayerCharacter::set_rest_angle(Joint jnt, float parent_angle, float child_
     joint_goal_angle[(size_t)jnt] = parent_angle - child_angle;
 }
 
-void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
+void PlayerCharacter::spawn(PhysicsEngine& physics, ResiduaEngine& re, glm::vec2 pos)
 {
+    pe = &physics;
     limbs.fill(INVALID);
     joint_ptrs.fill(nullptr);
+    facing_dir     = 1.f;   
+    arm_elbow_side = 1.f;
 
     auto offsets = char_config.compute_spawn_offsets();
 
@@ -186,24 +166,35 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
             rb.collision_layer = PLAYER_LAYER;
             rb.collision_mask  = PLAYER_MASK;
 
-            limbs[(size_t)lit->second] = pe.add_body(&re, std::move(rb));
+            limbs[(size_t)lit->second] = pe->add_body(&re, std::move(rb));
         } else {
-            limbs[(size_t)lit->second] = spawn_limb(pe, re, limb_images.at(lid), spawn_pos, density);
+            limbs[(size_t)lit->second] = spawn_limb(re, limb_images.at(lid), spawn_pos, density);
         }
     }
 
-    // Create joints from JSON definition
+    // Cache each foot's dynamic mass/inertia so sync_foot_pin() can zero them out
+    // (static, pinned) and restore them (dynamic, swinging) later.
+    {
+        const RigidBody& fl = pe->world.bodies[limbs[(size_t)Limb::FootL]];
+        foot_dyn_mass_l    = fl.mass;
+        foot_dyn_inertia_l = fl.inertia;
+        foot_friction_l    = fl.friction;
+        const RigidBody& fr = pe->world.bodies[limbs[(size_t)Limb::FootR]];
+        foot_dyn_mass_r    = fr.mass;
+        foot_dyn_inertia_r = fr.inertia;
+        foot_friction_r    = fr.friction;
+    }
+
     for (const auto& [jid, jc] : char_config.joints) {
         auto jit  = JOINT_FROM_ID.find(jid);
         auto plit = LIMB_FROM_ID.find(jc.parent_limb);
         auto clit = LIMB_FROM_ID.find(jc.child_limb);
         if (jit == JOINT_FROM_ID.end() || plit == LIMB_FROM_ID.end() || clit == LIMB_FROM_ID.end())
             continue;
-        add_joint(pe, jit->second, plit->second, clit->second,
+        add_joint(jit->second, plit->second, clit->second,
                   jc.attach_parent, jc.attach_child, -1.f, jc.max_torque);
     }
 
-    // Initialise goal angles from JSON defaults
     joint_goal_angle.fill(0.f);
     for (const auto& [jid, jc] : char_config.joints) {
         auto jit = JOINT_FROM_ID.find(jid);
@@ -211,10 +202,19 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
             joint_goal_angle[(size_t)jit->second] = jc.default_angle;
     }
 
+    // upright anchored torso
+    {
+        auto anchor = std::make_unique<AngleAnchor>(&pe->world, limbs[(size_t)Limb::Torso]);
+        anchor->rest_angle = 0.f;
+        torso_anchor = anchor.get();
+        pe->world.add_force(std::move(anchor));
+    }
+    left_step_target  = pos + offsets.at("foot_l");
+    right_step_target = pos + offsets.at("foot_r");
+
     // Assign draw layers from JSON draw_order:
     //   items before "torso" → layer 1, "torso"/"head" → layer 2, after "head" → layer 3
-    // layers are used to render certain parts of the body over others. these are fed into rendering draw layers
-    // for future reference, we will need to fit this into a larger layer system to allow for backgrounds / other layers
+    // TODO: integrate with larger draw order system. not exactly sure how this will work
     int layer = 1;
     for (const auto& lid : char_config.draw_order) {
         if (lid == "torso") layer = 2;
@@ -222,71 +222,242 @@ void PlayerCharacter::spawn(PhysicsEngine& pe, ResiduaEngine& re, glm::vec2 pos)
         if (lit != LIMB_FROM_ID.end()) {
             uint32_t bid = limbs[(size_t)lit->second];
             if (bid != INVALID)
-                pe.world.bodies[bid].draw_layer = layer;
+                pe->world.bodies[bid].draw_layer = layer;
         }
         if (lid == "head") layer = 3;
     }
 }
 
-void PlayerCharacter::despawn(PhysicsEngine& pe)
+void PlayerCharacter::despawn()
 {
-    upright_timer_   = 0.f;
-    height_timer_    = 0.f;
-    low_speed_timer_ = 0.f;
     if (!is_valid()) return;
 
+    release_anchor(true);
+    release_anchor(false);
+
     for (auto* j : joint_ptrs)
-        if (j) pe.world.remove_force(j);
+        if (j) pe->world.remove_force(j);
     joint_ptrs.fill(nullptr);
 
+    if (torso_anchor) pe->world.remove_force(torso_anchor);
+    torso_anchor = nullptr;
+
     for (uint32_t id : limbs)
-        if (id != INVALID) pe.remove_body(id);
+        if (id != INVALID) pe->remove_body(id);
     limbs.fill(INVALID);
 }
 
-void PlayerCharacter::reset_to(PhysicsEngine& pe, glm::vec2 pos)
+// anchoring sets an anchor goal but the actual pinning is managed by sync_foot_pin
+void PlayerCharacter::anchor_foot(bool left)
 {
-    if (!is_valid()) return;
+    uint32_t foot = foot_id(left);
+    if (foot == INVALID || anim_state == AnimationState::Jumping) return;
 
-    auto offsets = char_config.compute_spawn_offsets();
+    (left ? foot_anchored_l : foot_anchored_r) = true;
 
-    for (const auto& [lid, offset] : offsets) {
-        auto lit = LIMB_FROM_ID.find(lid);
-        if (lit == LIMB_FROM_ID.end()) continue;
-        size_t idx = (size_t)lit->second;
-        if (limbs[idx] == INVALID) continue;
-        pe.set_position        (limbs[idx], pos + offset);
-        pe.set_rotation        (limbs[idx], 0.f);
-        pe.set_velocity        (limbs[idx], { 0.f, 0.f });
-        pe.set_angular_velocity(limbs[idx], 0.f);
-    }
-
-    left_step_goal  = pos + offsets.at("foot_l");
-    right_step_goal = pos + offsets.at("foot_r");
-    left_step_target        = left_step_goal;
-    right_step_target       = right_step_goal;
-    left_step_normal        = { 0.f, -1.f };
-    right_step_normal       = { 0.f, -1.f };
-    left_step_normal_target = { 0.f, -1.f };
-    right_step_normal_target= { 0.f, -1.f };
-
-    left_airborne  = false;
-    right_airborne = false;
-    stride_counter = 0.f;
-    jump_timer     = 0.f;
-    grounded       = false;
-    was_grounded   = false;
-    facing_dir     = 1.f;
-    upright_timer_   = 0.f;
-    height_timer_    = 0.f;
-    low_speed_timer_ = 0.f;
-    state_history   = {};
-    current_action  = {};
-    previous_action = {};
+    sync_foot_pin(left);
 }
 
-static std::pair<float,float> solve_leg_ik(glm::vec2 hip, glm::vec2 ankle_target,
-                                            float knee_dir = 1.f)
+void PlayerCharacter::release_anchor(bool left)
+{
+    (left ? foot_anchored_l : foot_anchored_r) = false;
+    sync_foot_pin(left);
+}
+
+// when a foot should be anchored, this will attempt to place the foot in its anchored position and pin it there
+void PlayerCharacter::sync_foot_pin(bool left)
+{
+    uint32_t foot = foot_id(left);
+    if (foot == INVALID) return;
+
+    bool       anchored = left ? foot_anchored_l : foot_anchored_r;
+    bool&      pinned    = left ? foot_pinned_l   : foot_pinned_r;
+    RigidBody& rb        = pe->world.bodies[foot];
+
+    auto unpin = [&] {
+        pinned         = false;
+        rb.mass        = left ? foot_dyn_mass_l    : foot_dyn_mass_r;
+        rb.inertia     = left ? foot_dyn_inertia_l : foot_dyn_inertia_r;
+        rb.inv_mass    = rb.mass    > 0.f ? 1.f / rb.mass    : 0.f;
+        rb.inv_inertia = rb.inertia > 0.f ? 1.f / rb.inertia : 0.f;
+    };
+
+    // Break under a strong enough impact
+    if (pinned) {
+        DistanceJoint* ankle = joint_ptrs[(size_t)(left ? Joint::AnkleL : Joint::AnkleR)];
+        if (ankle) {
+            float force = glm::length(glm::vec2(ankle->lambda[0], ankle->lambda[1]));
+            if (force > foot_pin_break_force) {
+                unpin();
+                (left ? foot_anchored_l : foot_anchored_r) = false;
+                return;
+            }
+        }
+    }
+
+    if (!anchored) {
+        if (pinned) unpin();
+        return;
+    }
+
+    if (pinned || !snap_foot_to_ground(left)) return;
+
+    // set to static body
+    pinned         = true;
+    rb.mass        = 0.f;
+    rb.inv_mass    = 0.f;
+    rb.inertia     = 0.f;
+    rb.inv_inertia = 0.f;
+    rb.velocity    = glm::vec3(0.f);
+}
+
+void PlayerCharacter::update_facing()
+{
+    float dx = aim_pos.x - position().x;
+    if      (dx < -turn_deadzone) set_facing(-1.f);
+    else if (dx >  turn_deadzone) set_facing( 1.f);
+}
+
+// Turn around by mirroring the whole character about the torso's vertical axis. Bodies,
+// joint anchors, solver impulses and controller state are all mirrored together so every
+// constraint stays satisfied and nothing snaps
+void PlayerCharacter::set_facing(float dir)
+{
+    if (!is_valid() || dir == facing_dir) return;
+    facing_dir = dir;
+
+    float cx       = position().x;
+    auto  mirror_x = [cx](glm::vec2& p) { p.x = 2.f * cx - p.x; };
+    auto  mirror_v = [cx](glm::vec3& p) { p.x = 2.f * cx - p.x; p.z = -p.z; };
+
+    float mass = 0.f, vel_x = 0.f, prev_vel_x = 0.f;
+    for (uint32_t id : limbs) {
+        if (id == INVALID) continue;
+        const RigidBody& rb = pe->world.bodies[id];
+        mass       += rb.mass;
+        vel_x      += rb.mass * rb.velocity.x;
+        prev_vel_x += rb.mass * rb.prev_velocity.x;
+    }
+    if (mass > 0.f) { vel_x /= mass; prev_vel_x /= mass; }
+
+    for (uint32_t id : limbs) {
+        if (id == INVALID) continue;
+        RigidBody& rb = pe->world.bodies[id];
+        mirror_v(rb.position);
+        mirror_v(rb.initial);
+        mirror_v(rb.inertial);
+        if (rb.inv_mass > 0.f) {
+            rb.velocity.x      = 2.f * vel_x      - rb.velocity.x;
+            rb.prev_velocity.x = 2.f * prev_vel_x - rb.prev_velocity.x;
+        }
+        rb.velocity.z      = -rb.velocity.z;
+        rb.prev_velocity.z = -rb.prev_velocity.z;
+        pe->mirror_body_x(id);   // sprite, COM, collision polygon and SDF
+        // Swap near/far render layers: the side facing the camera changes
+        if      (rb.draw_layer == 1) rb.draw_layer = 3;
+        else if (rb.draw_layer == 3) rb.draw_layer = 1;
+    }
+
+    for (DistanceJoint* j : joint_ptrs) {
+        if (!j) continue;
+        j->rA_local.x = -j->rA_local.x;
+        j->rB_local.x = -j->rB_local.x;
+        j->rest_angle = -j->rest_angle;
+        j->lambda[0]  = -j->lambda[0];
+        j->lambda[2]  = -j->lambda[2];
+    }
+    if (torso_anchor) {
+        torso_anchor->rest_angle = -torso_anchor->rest_angle;
+        torso_anchor->lambda[0]  = -torso_anchor->lambda[0];
+    }
+
+    for (float& a : joint_goal_angle) a = -a;
+    for (LegPose* p : { &leg_angle_l, &leg_angle_r, &leg_target_l, &leg_target_r,
+                        &stance_phase_start, &swing_phase_start }) {
+        p->thigh = -p->thigh;
+        p->lower = -p->lower;
+    }
+    foot_angle_l = -foot_angle_l;
+    foot_angle_r = -foot_angle_r;
+    for (float* a : { &arm_shoulder_rest, &arm_elbow_rest, &arm_wrist_rest,
+                      &arm_shoulder_rest_r, &arm_elbow_rest_r, &arm_wrist_rest_r })
+        *a = -*a;
+    arm_elbow_side = -arm_elbow_side;
+
+    for (glm::vec2* p : { &left_step_target, &right_step_target })
+        mirror_x(*p);
+    standing_center_x = 2.f * cx - standing_center_x;
+}
+
+// gap between the foot and the ground, if the foot is within a given distance
+std::optional<float> PlayerCharacter::sole_clearance(bool left, float max_dist) const
+{
+    uint32_t foot = foot_id(left);
+    if (foot == INVALID) return std::nullopt;
+    const RigidBody& rb = pe->world.bodies[foot];
+    if (rb.shape.empty()) return std::nullopt;
+
+    glm::vec2 pos = glm::vec2(rb.position);
+    glm::vec2 sole(0.f, -std::numeric_limits<float>::infinity());
+    for (const glm::vec2& v : rb.shape) {
+        glm::vec2 w = pos + glm::rotate(v, rb.position.z);
+        if (w.y > sole.y) sole = w;
+    }
+
+    constexpr float CAST_ABOVE = 3.f;
+    glm::vec2 origin = sole - glm::vec2(0.f, CAST_ABOVE);
+    auto hit = pe->raycast(origin, glm::vec2(0.f, 1.f), CAST_ABOVE + max_dist, PLAYER_MASK);
+    if (!hit.has_value()) return std::nullopt;
+
+    return hit.value().point.y - sole.y;
+}
+
+bool PlayerCharacter::snap_foot_to_ground(bool left)
+{
+    auto clearance = sole_clearance(left, foot_pin_snap_dist);
+    if (!clearance.has_value()) return false;
+
+    // rotate the foot to the right angle to be pinned at
+    RigidBody& rb    = pe->world.bodies[foot_id(left)];
+    glm::vec3  saved = rb.position;
+    constexpr float CAST_ABOVE = 3.f;
+    glm::vec2 origin = glm::vec2(rb.position) - glm::vec2(0.f, CAST_ABOVE);
+    auto ground = pe->raycast(origin, glm::vec2(0.f, 1.f), CAST_ABOVE + STEP_RAY_DIST, PLAYER_MASK);
+    if (ground.has_value()) {
+        glm::vec2 n     = ground.value().normal;
+        float     turn  = wrap_angle(std::atan2(n.x, -n.y) - rb.position.z);
+        glm::vec2 ankle = ankle_position(left);
+        glm::vec2 rel   = glm::rotate(glm::vec2(rb.position) - ankle, turn);
+        rb.position     = glm::vec3(ankle + rel, rb.position.z + turn);
+        clearance       = sole_clearance(left, foot_pin_snap_dist);
+        if (!clearance.has_value()) { rb.position = saved; return false; }
+    }
+
+    rb.position.y += clearance.value();
+    return true;
+}
+
+bool PlayerCharacter::foot_grounded(bool left) const
+{
+    return (left ? foot_pinned_l : foot_pinned_r) || sole_clearance(left, foot_ground_dist).has_value();
+}
+
+
+// Move an angle toward target along the shortest arc, by at most max_delta
+static void step_angle(float& tracked, float target, float max_delta)
+{
+    float diff = std::atan2(std::sin(target - tracked), std::cos(target - tracked));
+    tracked += std::clamp(diff, -max_delta, max_delta);
+}
+
+// step angle from leg angles pointing straight down
+static void step_leg_angle(float& tracked, float target, float max_delta)
+{
+    tracked = wrap_angle(tracked);
+    tracked += std::clamp(wrap_angle(target) - tracked, -max_delta, max_delta);
+}
+
+static LegPose solve_leg_ik(glm::vec2 hip, glm::vec2 ankle_target, float knee_dir = 1.f)
 {
     glm::vec2 diff  = ankle_target - hip;
     float dist      = std::clamp(glm::length(diff),
@@ -311,267 +482,29 @@ void PlayerCharacter::apply_inputs(float md, bool walk, bool jmp, glm::vec2 aim)
     aim_pos  = aim;
 }
 
-void PlayerCharacter::handle_controls(PhysicsEngine& pe, float dt)
+void PlayerCharacter::animate_left_arm()
 {
     if (!is_valid()) return;
+    glm::vec2 torso_pos   = pe->get_position(limbs[(size_t)Limb::Torso]);
+    float     torso_angle = pe->get_rotation(limbs[(size_t)Limb::Torso]);
 
-    uint32_t  torso_id  = limbs[(size_t)Limb::Torso];
-    glm::vec2 torso_pos = pe.get_position(torso_id);
+    glm::vec2 shoulder_l = torso_pos + glm::rotate(glm::vec2(-facing_dir * SHOULDER_X, SHOULDER_Y), torso_angle);
 
-    {
-        auto hit = pe.raycast(torso_pos, glm::vec2(0.f, 1.f), ground_check_dist, PLAYER_MASK);
-        grounded = hit.has_value();
-    }
+    float     right_upper_arm_angle = pe->get_rotation(limbs[(size_t)Limb::UpperArmR]);
+    glm::vec2 upper_arm_r_pos       = pe->get_position(limbs[(size_t)Limb::UpperArmR]);
+    glm::vec2 elbow_r = upper_arm_r_pos + glm::rotate(glm::vec2(0.f, UPPER_ARM_MID), right_upper_arm_angle);
 
-}
-
-// Joint enum order → parent/child limb pairs (must match Joint enum in player_character.h)
-static constexpr struct { Limb parent; Limb child; } JOINT_LIMBS[(size_t)Joint::Count] = {
-    { Limb::Torso,     Limb::Head      },  // Neck
-    { Limb::Torso,     Limb::UpperArmL },  // ShoulderL
-    { Limb::UpperArmL, Limb::ForearmL  },  // ElbowL
-    { Limb::ForearmL,  Limb::HandL     },  // WristL
-    { Limb::Torso,     Limb::UpperArmR },  // ShoulderR
-    { Limb::UpperArmR, Limb::ForearmR  },  // ElbowR
-    { Limb::ForearmR,  Limb::HandR     },  // WristR
-    { Limb::Torso,     Limb::ThighL    },  // HipL
-    { Limb::ThighL,    Limb::LowerLegL },  // KneeL
-    { Limb::LowerLegL, Limb::FootL     },  // AnkleL
-    { Limb::Torso,     Limb::ThighR    },  // HipR
-    { Limb::ThighR,    Limb::LowerLegR },  // KneeR
-    { Limb::LowerLegR, Limb::FootR     },  // AnkleR
-};
-static_assert((size_t)Joint::Count == JOINT_COUNT, "JOINT_COUNT out of sync with Joint enum");
-
-void PlayerCharacter::update(PhysicsEngine& pe, float dt, bool apply_controls)
-{
-    if (!is_valid()) return;
-    if (apply_controls) {
-        handle_controls(pe, dt);
-        animate(pe, dt);
-    }
-    apply_joint_goals(pe);
-
-    // Righting torque: PD controller drives torso angle toward 0 (upright)
-    {
-        uint32_t torso_id = limbs[(size_t)Limb::Torso];
-        float angle = pe.get_rotation(torso_id);
-        angle = std::atan2(std::sin(angle), std::cos(angle)); // wrap to [-π, π]
-        float omega = pe.get_angular_velocity(torso_id);
-        float torque = -torso_upright_stiffness * angle - torso_upright_damping * omega;
-        pe.apply_torque(torso_id, torque);
-    }
-
-    // Advance animation frame 
-    const AnimationClip* clip = nullptr;
-    if (anim_state == PlayerAnimState::Standing) clip = &anim_standing;
-    if (clip && !clip->empty()) {
-        anim_frame += 1.f;
-        if (anim_frame >= float(clip->length))
-            anim_frame = 0.f;
-    }
-
-    capture_state(pe);
-
-    if (state_history.count > 0) {
-        const MovementState& cur = state_history.at(0);
-        if (std::abs(cur.torso_angle) < upright_angle_threshold)
-            upright_timer_ += dt;
-        else
-            upright_timer_ = 0.f;
-
-        if (cur.ground_dist < 9999.f && std::abs(cur.ground_dist - standing_height) < height_threshold)
-            height_timer_ += dt;
-        else
-            height_timer_ = 0.f;
-
-        if (std::abs(cur.torso_velocity.x) < low_speed_threshold)
-            low_speed_timer_ += dt;
-        else
-            low_speed_timer_ = 0.f;
-    }
-}
-
-void PlayerCharacter::apply_action(PhysicsEngine& pe, const Action& action)
-{
-    if (!is_valid()) return;
-    previous_action = current_action;
-    current_action  = action;
-    for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
-        if (i == (size_t)Joint::ShoulderL || i == (size_t)Joint::ElbowL || i == (size_t)Joint::WristL)
-            continue;
-        float goal = std::clamp(action.goal_angle_change[i], joint_angle_min[i], joint_angle_max[i]);
-        current_action.goal_angle_change[i] = goal;
-        joint_goal_angle[i] = goal;
-    }
-}
-
-void PlayerCharacter::capture_state(PhysicsEngine& pe)
-{
-    if (!is_valid()) return;
-
-    uint32_t torso_id = limbs[(size_t)Limb::Torso];
-
-    MovementState s;
-    s.move_dir               = move_dir;
-    s.walking                = walking;
-    s.jump                   = jump;
-    s.aim_pos                = aim_pos;
-    s.torso_velocity         = pe.get_velocity(torso_id);
-    float raw_angle          = pe.get_rotation(torso_id);
-    s.torso_angle            = std::atan2(std::sin(raw_angle), std::cos(raw_angle));
-    s.torso_angular_velocity = pe.get_angular_velocity(torso_id);
-
-    for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
-        float pa  = pe.get_rotation        (limbs[(size_t)JOINT_LIMBS[i].parent]);
-        float ca  = pe.get_rotation        (limbs[(size_t)JOINT_LIMBS[i].child]);
-        float pav = pe.get_angular_velocity(limbs[(size_t)JOINT_LIMBS[i].parent]);
-        float cav = pe.get_angular_velocity(limbs[(size_t)JOINT_LIMBS[i].child]);
-        float rel = pa - ca;
-        s.joint_angles[i]              = std::atan2(std::sin(rel), std::cos(rel));
-        s.joint_angular_velocities[i]  = pav - cav;
-    }
-
-    glm::vec2 torso_pos   = pe.get_position(torso_id);
-    float     torso_angle = pe.get_rotation(torso_id);
-    s.torso_pos = torso_pos;
-
-    auto wall_hit = pe.raycast(torso_pos, glm::vec2(facing_dir, 0.f), wall_check_dist, PLAYER_MASK);
-    s.wall_ahead  = wall_hit.has_value();
-
-    auto ground_hit = pe.raycast(torso_pos, glm::vec2(0.f, 1.f), 300.f, PLAYER_MASK);
-    s.ground_dist   = ground_hit.has_value() ? ground_hit.value().distance : 9999.f;
-    s.grounded      = ground_hit.has_value() && s.ground_dist <= ground_check_dist;
-
-    s.left_shoulder_pos = torso_pos + glm::rotate(glm::vec2(-SHOULDER_X, SHOULDER_Y), torso_angle);
-    s.left_arm_angle    = pe.get_rotation(limbs[(size_t)Limb::UpperArmL]);
-    s.facing_dir        = facing_dir;
-    glm::vec2 foot_l_pos = pe.get_position(limbs[(size_t)Limb::FootL]);
-    glm::vec2 foot_r_pos = pe.get_position(limbs[(size_t)Limb::FootR]);
-    s.feet_mid_x        = (foot_l_pos.x + foot_r_pos.x) * 0.5f;
-    s.feet_mid_y        = (foot_l_pos.y + foot_r_pos.y) * 0.5f;
-
-    for (uint32_t i = 0; i < (uint32_t)Limb::Count; ++i) {
-        if (limbs[i] != INVALID)
-            s.limb_velocities[i] = pe.get_velocity(limbs[i]);
-        else
-            s.limb_velocities[i] = { 0.f, 0.f };
-    }
-
-    get_anim_goals(s.anim_goal_current, s.anim_goal_next);
-
-    state_history.push(s);
-}
-
-// RL reward system for teaching controls. Does not work very well with the existing rewards
-float PlayerCharacter::compute_reward(float dt) const
-{
-    if (state_history.count == 0) return 0.f;
-    const MovementState& cur = state_history.at(0);
-
-    float reward = reward_alive;
-
-    // 1. Height: how far the torso is above the ground (0 lying flat → 1 at standing_height)
-    if (cur.ground_dist < 9999.f)
-        reward += reward_height * std::min(1.f, cur.ground_dist / standing_height);
-
-    // 2. Upright: cos(torso_angle), 1 vertical → 0 horizontal → negative upside-down
-    reward += reward_upright * std::max(0.f, std::cos(cur.torso_angle));
-
-    // 3. Feet below torso (Y increases downward, so positive diff = feet below torso)
-    float feet_below = cur.feet_mid_y - cur.torso_pos.y;
-    reward += reward_feet_below * std::min(1.f, std::max(0.f, feet_below / standing_height));
-
-    // 3b. Feet horizontally near torso
-    float feet_dx = std::abs(cur.feet_mid_x - cur.torso_pos.x);
-    reward += reward_feet_near_x * std::max(0.f, 1.f - feet_dx / feet_near_x_threshold);
-
-    // 4. Velocity penalty: linear and angular separately
-    reward -= penalty_velocity   * glm::dot(cur.torso_velocity, cur.torso_velocity);
-    reward -= penalty_torso_spin * cur.torso_angular_velocity * cur.torso_angular_velocity;
-
-    // 5. Action smoothness: penalize rapid changes in joint goal angles
-    {
-        float total = 0.f;
-        for (int i = 0; i < (int)JOINT_COUNT; ++i) {
-            float d = current_action.goal_angle_change[i] - previous_action.goal_angle_change[i];
-            float d2 = d * d;
-            total += d2 * d2;
-        }
-        reward -= penalty_action_rate * total;
-    }
-
-    // 7. Joint limit penalty: count joints beyond threshold
-    for (int i = 0; i < (int)JOINT_COUNT; ++i)
-        if (std::abs(cur.joint_angles[i]) > joint_limit_threshold)
-            reward -= penalty_joint_limit;
-
-    // 8. Animation conformance: reward joint angles matching current clip frame
-    {
-        float total = 0.f;
-        int   count = 0;
-        for (int i = 0; i < (int)JOINT_COUNT; ++i) {
-            if (!joint_animatable[i]) continue;
-            float err   = cur.joint_angles[i] - cur.anim_goal_current[i];
-            // Wrap error into [-π, π]
-            err = std::atan2(std::sin(err), std::cos(err));
-            float prox = std::max(0.f, 1.f - std::abs(err) / 1.5708f);
-            total += prox;
-            ++count;
-        }
-        if (count > 0)
-            reward += reward_anim_match * total / float(count);
-    }
-
-    return reward;
-}
-
-void PlayerCharacter::get_anim_goals(std::array<float, JOINT_COUNT>& current_out,
-                                      std::array<float, JOINT_COUNT>& next_out) const
-{
-    current_out.fill(0.f);
-    next_out.fill(0.f);
-
-    const AnimationClip* clip = nullptr;
-    if (anim_state == PlayerAnimState::Standing) clip = &anim_standing;
-    if (!clip || clip->empty()) return;
-
-    float next_frame = std::fmod(anim_frame + 1.f, float(clip->length));
-
-    auto fill = [&](float frame, std::array<float, JOINT_COUNT>& out) {
-        for (const auto& [jid, angle] : clip->sample(frame)) {
-            auto it = JOINT_FROM_ID.find(jid);
-            if (it != JOINT_FROM_ID.end())
-                out[(size_t)it->second] = angle;
-        }
-    };
-    fill(anim_frame,  current_out);
-    fill(next_frame,  next_out);
-}
-
-void PlayerCharacter::animate_left_arm(PhysicsEngine& pe)
-{
-    if (!is_valid()) return;
-    glm::vec2 torso_pos   = pe.get_position(limbs[(size_t)Limb::Torso]);
-    float     torso_angle = pe.get_rotation(limbs[(size_t)Limb::Torso]);
-
-    glm::vec2 shoulder_l = torso_pos + glm::rotate(glm::vec2(-SHOULDER_X, SHOULDER_Y), torso_angle);
-
-    // Project a virtual target far along the shoulder→mouse direction (avoid weird IK arm angles)
-    glm::vec2 raw_dir = aim_pos - shoulder_l;
-    float     raw_len = glm::length(raw_dir);
-    glm::vec2 aim_dir = (raw_len > 0.001f) ? raw_dir / raw_len : glm::vec2(1.f, 0.f);
-    glm::vec2 virtual_target = shoulder_l + aim_dir * 500.f;
-
-    auto [ua, fa] = solve_arm_ik(shoulder_l, virtual_target);
+    float     ua        = right_upper_arm_angle + facing_dir * support_arm_offset_angle;
+    glm::vec2 elbow_l    = shoulder_l + glm::vec2(-UPPER_ARM_LEN * std::sin(ua), UPPER_ARM_LEN * std::cos(ua));
+    glm::vec2 ld         = elbow_r - elbow_l;
+    float     fa         = std::atan2(-ld.x, ld.y);
 
     float target_shoulder = torso_angle - ua;
     float target_elbow    = ua - fa;
 
-    float max_delta = arm_angle_speed * pe.world.last_dt;
+    float max_delta = arm_angle_speed * pe->world.last_dt;
     auto step = [&](float& tracked, Joint jnt, float target) {
-        float diff = std::atan2(std::sin(target - tracked), std::cos(target - tracked));
-        tracked += std::clamp(diff, -max_delta, max_delta);
+        step_angle(tracked, target, max_delta);
         joint_goal_angle[(size_t)jnt] = tracked;
     };
 
@@ -580,163 +513,55 @@ void PlayerCharacter::animate_left_arm(PhysicsEngine& pe)
     step(arm_wrist_rest,    Joint::WristL,    0.f);
 }
 
-void PlayerCharacter::apply_joint_goals(PhysicsEngine& /*pe*/)
+void PlayerCharacter::animate_right_arm()
+{
+    if (!is_valid()) return;
+    glm::vec2 torso_pos   = pe->get_position(limbs[(size_t)Limb::Torso]);
+    float     torso_angle = pe->get_rotation(limbs[(size_t)Limb::Torso]);
+
+    glm::vec2 shoulder_r = torso_pos + glm::rotate(glm::vec2(facing_dir * SHOULDER_X, SHOULDER_Y), torso_angle);
+
+    // Project a virtual target far along the shoulder→mouse direction (avoid weird IK arm angles)
+    glm::vec2 raw_dir = aim_pos - shoulder_r;
+    float     raw_len = glm::length(raw_dir);
+    glm::vec2 aim_dir = (raw_len > 0.001f) ? raw_dir / raw_len : glm::vec2(1.f, 0.f);
+    glm::vec2 virtual_target = shoulder_r + aim_dir * 500.f;
+
+    auto [ua, fa] = solve_arm_ik(shoulder_r, virtual_target, arm_elbow_side);
+
+    float target_shoulder = torso_angle - ua;
+    float target_elbow    = ua - fa;
+
+    float max_delta = arm_angle_speed * pe->world.last_dt;
+    auto step = [&](float& tracked, Joint jnt, float target) {
+        step_angle(tracked, target, max_delta);
+        joint_goal_angle[(size_t)jnt] = tracked;
+    };
+
+    step(arm_shoulder_rest_r, Joint::ShoulderR, target_shoulder);
+    step(arm_elbow_rest_r,    Joint::ElbowR,    target_elbow);
+    step(arm_wrist_rest_r,    Joint::WristR,    0.f);
+}
+
+void PlayerCharacter::apply_joint_goals()
 {
     if (!is_valid()) return;
     for (size_t i = 0; i < (size_t)Joint::Count; ++i) {
         if (!joint_ptrs[i]) continue;
-        float goal = joint_limited[i]
-                   ? std::clamp(joint_goal_angle[i], joint_angle_min[i], joint_angle_max[i])
-                   : joint_goal_angle[i];
-        joint_ptrs[i]->rest_angle   = goal;
-        joint_ptrs[i]->stiffness[2] = joint_bend_stiffness;
+        // Limits are authored facing right; mirror them when facing left
+        float lo = facing_dir > 0.f ? joint_angle_min[i] : -joint_angle_max[i];
+        float hi = facing_dir > 0.f ? joint_angle_max[i] : -joint_angle_min[i];
+        float goal = wrap_angle(joint_goal_angle[i]);
+        if (joint_limited[i]) goal = std::clamp(goal, lo, hi);
+        joint_ptrs[i]->rest_angle = goal;
+        joint_ptrs[i]->configureBendMotor(joint_bend_hz, joint_bend_damping_ratio, joint_bend_max_accel);
     }
+
+    if (torso_anchor)
+        torso_anchor->configureBendMotor(joint_bend_hz, joint_bend_damping_ratio, joint_bend_max_accel);
 }
 
-void PlayerCharacter::animate(PhysicsEngine& pe, float dt)
-{
-    if (!is_valid()) return;
-
-    glm::vec2 torso_pos   = pe.get_position(limbs[(size_t)Limb::Torso]);
-    float     torso_angle = pe.get_rotation(limbs[(size_t)Limb::Torso]);
-
-    // TODO: fix direction facing
-    // facing_dir = (aim_pos.x > torso_pos.x) ? 1.f : -1.f;
-    // for (uint32_t id : limbs)
-    //    if (id != INVALID) pe.world.bodies[id].flip_h = !(facing_dir > 0.f);
-
-    animate_arms(pe, torso_pos, torso_angle);
-    test_animate(pe);
-}
-
-void PlayerCharacter::test_animate(PhysicsEngine& pe)
-{
-    if (!is_valid()) return;
-
-    const AnimationClip* clip = (anim_state == PlayerAnimState::Standing) ? &anim_standing : nullptr;
-    if (!clip || clip->empty()) return;
-
-    for (const auto& [jid, angle] : clip->sample(anim_frame)) {
-        auto it = JOINT_FROM_ID.find(jid);
-        if (it == JOINT_FROM_ID.end()) continue;
-
-        Joint jnt = it->second;
-        if (jnt == Joint::ShoulderL || jnt == Joint::ElbowL || jnt == Joint::WristL)
-            continue;
-
-        joint_goal_angle[(size_t)jnt] = angle;
-    }
-}
-
-void PlayerCharacter::update_grounded(PhysicsEngine& pe, float dt, glm::vec2 air_normal)
-{
-    float hvel        = velocity(pe).x;
-    float step_offset = move_dir < 0.0f ? RUN_STEP_LEFT_OFF : 0.0f;
-
-    if (!walking && move_dir != 0.f) {
-        animation_leg_state = AnimationLegState::Running;
-        if (stride_counter < step_time) {
-            if (right_airborne) {
-                auto hit = select_next_step(pe, true, step_offset);
-                if (hit.has_value()) { right_step_target = hit.value().point; right_step_normal_target = hit.value().normal; right_airborne = false; }
-            }
-            left_step_target = position(pe) + airborn_foot_offset * glm::vec2(move_dir, 1.f)
-                               + glm::vec2(RUN_STEP_BASE_X * move_dir, 0.0f)
-                               + glm::vec2(RUN_ARC_X * move_dir, RUN_ARC_Y) * stride_counter / step_time;
-            left_step_normal_target = air_normal;
-            left_airborne = true;
-        } else if (stride_counter < step_time * 2.f) {
-            if (left_airborne) {
-                auto hit = select_next_step(pe, false, step_offset);
-                if (hit.has_value()) { left_step_target = hit.value().point; left_step_normal = hit.value().normal; left_airborne = false; }
-            }
-            right_step_target = position(pe) + airborn_foot_offset * glm::vec2(move_dir, 1.f)
-                                + glm::vec2(RUN_ARC_X * move_dir, RUN_ARC_Y) * stride_counter / step_time;
-            right_step_normal_target = air_normal;
-            right_airborne = true;
-        }
-        stride_counter += dt * (glm::abs(hvel) / max_speed + 0.5f);
-        if (stride_counter > step_time * 2.f) stride_counter = 0.f;
-    } else if (walking && move_dir != 0.f) {
-        animation_leg_state = AnimationLegState::Walking;
-        if (stride_counter < step_time) {
-            if (right_airborne) {
-                auto hit = select_next_step(pe, true);
-                if (hit.has_value()) { right_step_target = hit.value().point; right_step_normal_target = hit.value().normal; right_airborne = false; }
-            }
-            left_airborne = true;
-        } else if (stride_counter < step_time * 2.f) {
-            if (left_airborne) {
-                auto hit = select_next_step(pe, false);
-                if (hit.has_value()) { left_step_target = hit.value().point; left_step_normal = hit.value().normal; left_airborne = false; }
-            }
-            right_airborne = true;
-        }
-        stride_counter += dt * WALK_STRIDE_RATE;
-        if (stride_counter > step_time * 2.f) stride_counter = 0.f;
-    }
-    if (move_dir == 0.f) {
-        animation_leg_state = AnimationLegState::Stationary;
-        auto hit = get_standing_step(pe, false);
-        if (hit.has_value()) { left_step_target  = hit.value().point; left_step_normal_target  = hit.value().normal; left_airborne  = false; }
-        hit = get_standing_step(pe, true);
-        if (hit.has_value()) { right_step_target = hit.value().point; right_step_normal_target = hit.value().normal; right_airborne = false; }
-        stride_counter = 0.f;
-    }
-}
-
-void PlayerCharacter::update_airborne(PhysicsEngine& pe, glm::vec2 air_normal)
-{
-    float vy     = velocity(pe).y;
-    bool  falling = vy > 0.f;
-
-    auto  hit              = pe.raycast(position(pe), glm::vec2(0.f, 1.f), AIRBORNE_RAY_DIST, PLAYER_MASK);
-    float dist_from_ground = hit.has_value() ? hit.value().distance : 999.f;
-
-    bool  right_high = facing_dir > 0.f;
-    float left_y_lo  = right_high ? jump_foot_y_low : jump_foot_y;
-    float right_y_lo = right_high ? jump_foot_y     : jump_foot_y_low;
-
-    if (jump_timer > 0.0f) {
-        left_step_target  = position(pe) + glm::vec2(-jump_foot_x, left_y_lo);
-        right_step_target = position(pe) + glm::vec2( jump_foot_x, right_y_lo);
-        left_step_normal_target  = air_normal;
-        right_step_normal_target = air_normal;
-    } else if (!falling || dist_from_ground > jump_airborne_dist) {
-        left_step_target  = position(pe) + glm::vec2(-jump_foot_x, jump_foot_y);
-        right_step_target = position(pe) + glm::vec2( jump_foot_x, jump_foot_y);
-        left_step_normal_target  = air_normal;
-        right_step_normal_target = air_normal;
-    } else if (hit.has_value()) {
-        if (move_dir < 0.0f) {
-            left_step_target         = hit.value().point + glm::vec2(-jump_foot_x, right_high ? 0.f : jump_foot_y);
-            right_step_target        = position(pe)      + glm::vec2( jump_foot_x, jump_foot_y);
-            left_step_normal_target  = hit.value().normal;
-            right_step_normal_target = air_normal;
-        } else {
-            right_step_target        = hit.value().point + glm::vec2( jump_foot_x, right_high ? 0.f : jump_foot_y);
-            right_step_normal_target = hit.value().normal;
-            left_step_target         = position(pe)      + glm::vec2(-jump_foot_x, jump_foot_y);
-            left_step_normal_target  = air_normal;
-        }
-    }
-    left_airborne  = false;
-    right_airborne = false;
-    stride_counter = 0.f;
-}
-
-void PlayerCharacter::interpolate_steps(float dt)
-{
-    float interp      = animation_leg_state == AnimationLegState::Running ? INTERP_RUNNING : INTERP_OTHER;
-    float goal_interp = grounded ? interp : interp * INTERP_AIR_MULT;
-    float t = 1.f - std::exp(-goal_interp * dt);
-    left_step_goal  = glm::mix(left_step_goal,  left_step_target, t);
-    right_step_goal = glm::mix(right_step_goal, right_step_target, t);
-    left_step_normal  = glm::normalize(glm::mix(left_step_normal,  left_step_normal_target,  t));
-    right_step_normal = glm::normalize(glm::mix(right_step_normal, right_step_normal_target, t));
-}
-
-std::pair<float,float> PlayerCharacter::solve_arm_ik(glm::vec2 shoulder, glm::vec2 target) const
+std::pair<float,float> PlayerCharacter::solve_arm_ik(glm::vec2 shoulder, glm::vec2 target, float& elbow_side)
 {
     glm::vec2 diff = target - shoulder;
     float dist = std::clamp(glm::length(diff),
@@ -746,16 +571,18 @@ std::pair<float,float> PlayerCharacter::solve_arm_ik(glm::vec2 shoulder, glm::ve
                   / (2.f * UPPER_ARM_LEN * dist);
     float alpha = std::acos(std::clamp(cos_a, -1.f, 1.f));
     float phi   = std::atan2(-diff.x, diff.y);
-    for (int s : {1, -1}) {
+
+    for (int s : {(int)elbow_side, -(int)elbow_side}) {
         float ua_a  = phi + s * alpha;
         glm::vec2 elbow = shoulder + glm::vec2(-UPPER_ARM_LEN * std::sin(ua_a),
                                                 UPPER_ARM_LEN * std::cos(ua_a));
         if (elbow.y >= shoulder.y) {
+            elbow_side = (float)s;
             glm::vec2 ld = target - elbow;
             return { ua_a, std::atan2(-ld.x, ld.y) };
         }
     }
-    float ua_a  = phi - alpha;
+    float ua_a  = phi - elbow_side * alpha;
     glm::vec2 elbow = shoulder + glm::vec2(-UPPER_ARM_LEN * std::sin(ua_a),
                                             UPPER_ARM_LEN * std::cos(ua_a));
     glm::vec2 ld    = target - elbow;
@@ -771,71 +598,693 @@ void PlayerCharacter::animate_leg_fk(Joint hip, Joint knee, Joint ankle,
     set_rest_angle(ankle, lower_angle,  foot_angle);
 }
 
-void PlayerCharacter::animate_legs(PhysicsEngine& pe, float dt, glm::vec2 torso_pos, float torso_angle)
+glm::vec2 PlayerCharacter::hip_position(bool left) const
 {
-    bool facing_right = facing_dir > 0.f;
-
-    glm::vec2 hip_l = torso_pos + glm::rotate(glm::vec2(-HIP_X, HIP_Y), torso_angle);
-    glm::vec2 hip_r = torso_pos + glm::rotate(glm::vec2( HIP_X, HIP_Y), torso_angle);
-
-    glm::vec2 ankle_tgt_l = (facing_right ? left_step_goal  : right_step_goal) + glm::vec2(0.f, ANKLE_RAISE);
-    glm::vec2 ankle_tgt_r = (facing_right ? right_step_goal : left_step_goal)  + glm::vec2(0.f, ANKLE_RAISE);
-
-    auto [tl, ll] = solve_leg_ik(hip_l, ankle_tgt_l, facing_dir);
-    auto [tr, lr] = solve_leg_ik(hip_r, ankle_tgt_r, facing_dir);
-
-    float max_d = max_leg_angle_speed * dt;
-    auto approach = [&](float cur, float tgt) {
-        float d = std::atan2(std::sin(tgt - cur), std::cos(tgt - cur));
-        return cur + std::clamp(d, -max_d, max_d);
-    };
-    thigh_angle_l = approach(thigh_angle_l, tl);
-    lower_angle_l = approach(lower_angle_l, ll);
-    thigh_angle_r = approach(thigh_angle_r, tr);
-    lower_angle_r = approach(lower_angle_r, lr);
-
-    auto resolve_foot_angle = [this](glm::vec2 normal) {
-        constexpr float PI = 3.14159265f;
-        float a = std::atan2(normal.y, normal.x) + PI * 0.5f;
-        if (a >  PI) a -= 2.f * PI;
-        if (-std::sin(a) * facing_dir < 0.f) { a += PI; if (a > PI) a -= 2.f * PI; }
-        return a;
-    };
-    float foot_angle_l = resolve_foot_angle(facing_right ? left_step_normal  : right_step_normal);
-    float foot_angle_r = resolve_foot_angle(facing_right ? right_step_normal : left_step_normal);
-
-    animate_leg_fk(Joint::HipL, Joint::KneeL, Joint::AnkleL, torso_angle, thigh_angle_l, lower_angle_l, foot_angle_l);
-    animate_leg_fk(Joint::HipR, Joint::KneeR, Joint::AnkleR, torso_angle, thigh_angle_r, lower_angle_r, foot_angle_r);
+    return position() + glm::rotate(glm::vec2(side_x(left) * HIP_X, HIP_Y), rotation());
 }
 
-void PlayerCharacter::animate_arms(PhysicsEngine& pe, glm::vec2, float)
+glm::vec2 PlayerCharacter::ankle_position(bool left) const
 {
-    animate_left_arm(pe);
+    const RigidBody&     foot  = pe->world.bodies[foot_id(left)];
+    const DistanceJoint* ankle = joint_ptrs[(size_t)(left ? Joint::AnkleL : Joint::AnkleR)];
+    glm::vec2 pos = glm::vec2(foot.position);
+    return ankle ? pos + glm::rotate(ankle->rB_local, foot.position.z) : pos;
 }
 
-std::optional<RaycastHit> PlayerCharacter::select_next_step(PhysicsEngine& pe, bool right, float x_offset)
+// Cast down-rays from x_from toward x_to (inclusive, 1 unit apart) and store the
+// first ground hit as this foot's step target
+bool PlayerCharacter::scan_step_target(bool left, float x_from, float x_to)
 {
-    float step_offset = (right ? STEP_RIGHT_EXTRA : 0.0f) + x_offset;
-    glm::vec2 origin = position(pe) + glm::vec2(
-        move_dir * (step_offset + (glm::abs(velocity(pe).x) / max_speed + STEP_VEL_MIN)
-        * step_length_test * (animation_leg_state == AnimationLegState::Walking ? STEP_WALK_MULT : 1.0f)),
-        0.0f);
-    auto hit = pe.raycast(origin, glm::vec2(0.f, 1.f), STEP_RAY_DIST, PLAYER_MASK);
-    if (hit.has_value() && hit.value().point.y > position(pe).y + STEP_HEIGHT_THRESH)
-        hit.value().point += glm::vec2(0.0f, STEP_HEIGHT_NUDGE);
-    return hit;
+    float origin_y = position().y + standing_origin_y;
+    float dir      = x_to < x_from ? -1.f : 1.f;
+    for (float x = x_from; dir * (x_to - x) >= 0.f; x += dir) {
+        glm::vec2 origin = glm::vec2(x, origin_y);
+        auto hit = pe->raycast(origin, glm::vec2(0.f, 1.f), STEP_RAY_DIST, PLAYER_MASK);
+        DebugDraw::get().line(origin, hit.has_value() ? hit.value().point : origin + glm::vec2(0.f, STEP_RAY_DIST),
+                               hit.has_value() ? 0x00FFFFFF : 0xFF00FFFF);
+        if (!hit.has_value()) continue;
+
+        step_target(left) = hit.value().point;
+        return true;
+    }
+    return false;
 }
 
-std::optional<RaycastHit> PlayerCharacter::get_standing_step(PhysicsEngine& pe, bool right)
+bool PlayerCharacter::foot_near_step_target(bool left)
 {
-    float step_offset = right ? 0.0f : -STANDING_STEP_X * facing_dir;
-    glm::vec2 origin  = position(pe) + glm::vec2(step_offset, STANDING_ORIGIN_Y);
-    auto hit = pe.raycast(origin, glm::vec2(0.f, 1.f), STEP_RAY_DIST, PLAYER_MASK);
-    if (hit.has_value() && hit.value().point.y > position(pe).y + STEP_HEIGHT_THRESH)
-        hit.value().point += glm::vec2(0.0f, STEP_HEIGHT_NUDGE);
-    return hit;
+    return glm::length(pe->get_position(foot_id(left)) - step_target(left)) <= foot_land_dist;
 }
 
-glm::vec2 PlayerCharacter::position(PhysicsEngine& pe) const { return pe.get_position(limbs[(size_t)Limb::Torso]); }
-glm::vec2 PlayerCharacter::velocity(PhysicsEngine& pe) const { return pe.get_velocity(limbs[(size_t)Limb::Torso]); }
-float     PlayerCharacter::rotation(PhysicsEngine& pe) const { return pe.get_rotation(limbs[(size_t)Limb::Torso]); }
+bool PlayerCharacter::try_land_foot(bool left)
+{
+    if (!grounded(left) || !foot_near_step_target(left)) return false;
+    anchor_foot(left);
+    return true;
+}
+
+// Single-ray step to target_x, IK the leg toward it, and anchor once the foot lands
+bool PlayerCharacter::settle_foot(bool left, float target_x)
+{
+    if (!scan_step_target(left, target_x, target_x)) return false;
+    leg_target(left) = reach_step_target(hip_position(left), left);
+    return try_land_foot(left);
+}
+
+LegPose PlayerCharacter::reach_step_target(glm::vec2 hip, bool left)
+{
+    return solve_leg_ik(hip, step_target(left) + glm::vec2(0.f, ANKLE_RAISE), facing_dir);
+}
+
+LegPose PlayerCharacter::standing_planted_pose() const
+{
+    float lower = facing_dir * standing_lower_lean_angle;
+    return { lower + facing_dir * standing_thigh_bend_angle, lower };
+}
+
+LegPose PlayerCharacter::walking_stance_pose(float t) const
+{
+    float   stance_end = facing_dir * stance_lean_angle;
+    LegPose pose { glm::mix(stance_phase_start.thigh, stance_end, t), 0.f };
+
+    if (t < 2.f/3.f) {
+        pose.lower = glm::mix(stance_phase_start.lower, stance_end, t);
+    } else {
+        float lower_at_two_thirds = glm::mix(stance_phase_start.lower, stance_end, 2.f/3.f);
+        float kick_end            = stance_end + facing_dir * trailing_kick_angle;
+        float t3                  = (t - 2.f/3.f) / (1.f/3.f);
+        pose.lower = glm::mix(lower_at_two_thirds, kick_end, t3);
+    }
+    return pose;
+}
+
+LegPose PlayerCharacter::walking_swing_pose(bool swing_left, float t)
+{
+    float thigh_bent_up = -facing_dir * swing_thigh_forward_angle; 
+    float lower_bent_up =  facing_dir * recovery_bend_angle;      
+
+    if (t < 1.f/3.f) {
+        float t3 = t / (1.f/3.f);
+        return { glm::mix(swing_phase_start.thigh, thigh_bent_up, t3),
+                 glm::mix(swing_phase_start.lower, lower_bent_up, t3) };
+    }
+    if (t < 2.f/3.f) {
+        float t3 = (t - 1.f/3.f) / (1.f/3.f);
+        return { thigh_bent_up, glm::mix(lower_bent_up, thigh_bent_up, t3) };
+    }
+    float     t3   = (t - 2.f/3.f) / (1.f/3.f);
+    glm::vec2 diff = step_target(swing_left) + glm::vec2(0.f, ANKLE_RAISE) - hip_position(swing_left);
+    float straight_angle = std::atan2(-diff.x, diff.y); // same convention as solve_leg_ik's chain_phi
+    return { glm::mix(thigh_bent_up, straight_angle, t3), glm::mix(thigh_bent_up, straight_angle, t3) };
+}
+
+// Knees stay bent throughout: the calf trails the thigh by knee_bend
+LegPose PlayerCharacter::backward_bent_pose(float thigh, float knee_bend) const
+{
+    return { thigh, thigh + facing_dir * knee_bend };
+}
+
+// Planted leg rotates from behind the body to in front of it, pushing the body backward
+LegPose PlayerCharacter::backward_stance_pose(float t) const
+{
+    LegPose end = backward_bent_pose(-facing_dir * backward_stance_lean_angle, backward_knee_bend);
+    return { glm::mix(stance_phase_start.thigh, end.thigh, t),
+             glm::mix(stance_phase_start.lower, end.lower, t) };
+}
+
+// Lifted leg raises its thigh forward a bit with the calf tucked, then swings back and
+// unfolds to reach the step target
+LegPose PlayerCharacter::backward_swing_pose(bool swing_left, float t)
+{
+    LegPose lifted = backward_bent_pose(swing_phase_start.thigh - facing_dir * backward_swing_lift_angle,
+                                        backward_swing_knee_bend);
+
+    if (t < 1.f/3.f) {
+        float t3 = t / (1.f/3.f);
+        return { glm::mix(swing_phase_start.thigh, lifted.thigh, t3),
+                 glm::mix(swing_phase_start.lower, lifted.lower, t3) };
+    }
+    float     t3   = (t - 1.f/3.f) / (2.f/3.f);
+    glm::vec2 diff = step_target(swing_left) + glm::vec2(0.f, ANKLE_RAISE) - hip_position(swing_left);
+    LegPose   reach = backward_bent_pose(std::atan2(-diff.x, diff.y), backward_knee_bend);
+    return { glm::mix(lifted.thigh, reach.thigh, t3), glm::mix(lifted.lower, reach.lower, t3) };
+}
+
+LegPose PlayerCharacter::crouch_pose() const
+{
+    float thigh = -facing_dir * jump_squat_thigh_angle;
+    return { thigh, thigh + facing_dir * jump_squat_knee_bend };
+}
+
+// Thighs raised forward with calves tucked while rising; thighs drop and calves partly untuck
+// once falling (y points down, so rising is negative velocity)
+LegPose PlayerCharacter::air_pose(bool left) const
+{
+    bool  rising = fall_time < jump_fall_delay;   // keep the tuck for a moment after the peak
+    float raise  = rising ? (left ? jump_rise_thigh_l : jump_rise_thigh_r)
+                          : (left ? jump_fall_thigh_l : jump_fall_thigh_r);
+    float bend   = rising ? jump_rise_knee_bend : jump_fall_knee_bend;
+    float thigh  = -facing_dir * raise;
+    return { thigh, thigh + facing_dir * bend };
+}
+
+void PlayerCharacter::begin_gait_phase()
+{
+    stance_phase_start = leg_angle(stance_left);
+    swing_phase_start  = leg_angle(!stance_left);
+}
+
+// ── update() stages ───────────────────────────────────────────────────────────
+
+void PlayerCharacter::update_standing_anchors()
+{
+    gait_timer = 0.f;
+
+    if (foot_anchored_l || foot_anchored_r) {
+        for (bool left : { true, false })
+            if (!foot_anchored(left)) try_land_foot(left);
+        return;
+    }
+
+    // Nothing anchored yet: pin grounded feet where they are
+    for (bool left : { true, false })
+        if (grounded(left)) stance_left = left;
+    anchor_grounded_feet();
+    standing_center_x = position().x;
+    begin_gait_phase();
+}
+
+void PlayerCharacter::anchor_grounded_feet()
+{
+    for (bool left : { true, false })
+        if (grounded(left) && !foot_anchored(left))
+            anchor_foot(left);
+}
+
+AnimationState PlayerCharacter::next_animation_state() const
+{
+    bool on_ground = grounded_l || grounded_r;
+
+    if (jump_launched)
+        return AnimationState::Jumping;
+    if (anim_state == AnimationState::Jumping && state_time < JUMP_ANIMATION_LENGTH)
+        return AnimationState::Jumping;
+
+    if (!on_ground) {
+        float delay = anim_state == AnimationState::Running ? run_airborne_delay : AIRBORNE_DELAY;
+        if (anim_state == AnimationState::Jumping || air_time >= delay)
+            return AnimationState::Airborne;
+        return anim_state;
+    }
+
+    if (anim_state == AnimationState::Jumping || anim_state == AnimationState::Airborne)
+        return AnimationState::Landing;
+    if (anim_state == AnimationState::Landing && state_time < LANDING_ANIMATION_LENGTH)
+        return AnimationState::Landing;
+    if (jump_timer > 0.f)
+        return AnimationState::JumpSquat;
+    // break stride if going from running to stopping state
+    if (run_stopping()) {
+        if (std::abs(velocity().x) > run_stop_speed || run_phase != RunPhase::Drive)
+            return AnimationState::Running;
+        return move_dir == 0.f ? AnimationState::Standing : AnimationState::Walking;
+    }
+    if (move_dir == 0.f)
+        return AnimationState::Standing;
+    return (walking || walking_backward()) ? AnimationState::Walking : AnimationState::Running;
+}
+
+void PlayerCharacter::update_animation_state(float dt)
+{
+    state_time += dt;
+
+    AnimationState next = next_animation_state();
+    if (next != anim_state)
+        enter_animation_state(next);
+}
+
+void PlayerCharacter::enter_animation_state(AnimationState next)
+{
+    AnimationState prev = anim_state;
+    anim_state    = next;
+    state_time    = 0.f;
+    jump_launched = false;
+
+    switch (next) {
+    case AnimationState::Standing:
+        settling = prev == AnimationState::Walking || prev == AnimationState::Running
+                || prev == AnimationState::Landing;
+        break;
+    case AnimationState::Walking:
+        gait_timer = 0.f;
+        begin_gait_phase();
+        break;
+    case AnimationState::Running:
+        begin_run_cycle();
+        break;
+    case AnimationState::JumpSquat: {
+        settling     = false;
+        squat_vel_x  = com_velocity_x();
+        squat_moving = (prev == AnimationState::Running || prev == AnimationState::Walking)
+                    && std::abs(squat_vel_x) > run_stop_speed;
+        if (!squat_moving) {
+            anchor_grounded_feet();
+            break;
+        }
+        // Moving: squat on the planted foot only, keeping it anchored
+        if (foot_anchored_l != foot_anchored_r) squat_left = foot_anchored_l;
+        else if (foot_anchored_l)               squat_left = stance_left;
+        else                                    squat_left = grounded_l || !grounded_r;
+        if (!foot_anchored(squat_left) && grounded(squat_left))
+            anchor_foot(squat_left);
+        release_anchor(!squat_left);
+        break;
+    }
+    case AnimationState::Landing:
+        anchor_grounded_feet();
+        break;
+    case AnimationState::Jumping:
+    case AnimationState::Airborne:
+        settling = false;
+        release_anchor(true);
+        release_anchor(false);
+        break;
+    }
+}
+
+void PlayerCharacter::set_animation_goals(float dt)
+{
+    switch (anim_state) {
+    case AnimationState::Standing:
+        if (settling) update_settling();
+        else          update_standing();
+        break;
+    case AnimationState::Walking:
+        update_walking(dt);
+        break;
+    case AnimationState::Running:
+        update_running(dt);
+        break;
+    case AnimationState::JumpSquat: {
+        if (!squat_moving) {
+            anchor_grounded_feet();
+            leg_target_l = leg_target_r = crouch_pose();
+            break;
+        }
+        bool      plant = squat_left;
+        glm::vec2 ankle = ankle_position(plant);
+        glm::vec2 want  = hip_position(plant) + glm::vec2(squat_vel_x * dt, jump_squat_sink_speed * dt);
+        want.y = std::min(want.y, ankle.y - jump_squat_min_hip_height);  
+        leg_target(plant)  = solve_leg_ik(want, ankle, facing_dir);
+        leg_target(!plant) = crouch_pose();
+        if (!foot_pinned(plant))
+            add_velocity_x(squat_vel_x - com_velocity_x());
+        break;
+    }
+    case AnimationState::Landing:
+        anchor_grounded_feet();
+        leg_target_l = leg_target_r = crouch_pose();
+        break;
+    case AnimationState::Jumping:
+        if (grounded_l || grounded_r) break;
+        [[fallthrough]];
+    case AnimationState::Airborne:
+        leg_target_l = air_pose(true);
+        leg_target_r = air_pose(false);
+        break;
+    }
+}
+
+// settling goes from running to standing - we  should take one step before we stop
+void PlayerCharacter::update_settling()
+{
+    bool swing_left = !stance_left;
+
+    if (!foot_anchored(swing_left)) {
+        settle_foot(swing_left, position().x + side_x(swing_left) * settle_step_dist);
+        leg_target(stance_left) = standing_planted_pose();
+        return;
+    }
+
+    if (foot_anchored(stance_left))
+        release_anchor(stance_left);
+
+    float settled_x = pe->get_position(foot_id(swing_left)).x;
+    if (settle_foot(stance_left, settled_x + side_x(stance_left) * feet_gap)) {
+        settling = false;
+        standing_center_x = position().x;
+    }
+    leg_target(swing_left) = standing_planted_pose();
+}
+
+void PlayerCharacter::update_standing()
+{
+    if (std::abs(velocity().x) > standing_settle_speed)
+        standing_center_x = position().x;
+
+    for (bool left : { true, false }) {
+        if (grounded(left)) {
+            leg_target(left) = standing_planted_pose();
+            continue;
+        }
+
+        // Reach a lifted foot back down, searching from feet_gap out in toward center
+        float side = side_x(left);
+        scan_step_target(left, standing_center_x + side * feet_gap, standing_center_x);
+        glm::vec2 centered_hip = glm::vec2(standing_center_x + side * HIP_X, position().y + HIP_Y);
+        leg_target(left) = reach_step_target(centered_hip, left);
+    }
+}
+
+void PlayerCharacter::update_walking(float dt)
+{
+    float period = running_backward() ? backward_run_step_period
+                 : walking_backward() ? backward_step_period : step_period;
+    gait_timer = std::min(gait_timer + dt, period);
+    float t_pre = std::clamp(gait_timer / period, 0.f, 1.f);
+
+    bool pre_swing_left = !stance_left;
+    bool switched = t_pre >= 1.f/3.f &&
+                    (grounded(pre_swing_left) || (t_pre >= 2.f/3.f && foot_near_step_target(pre_swing_left)));
+
+    if (t_pre >= 2.f/3.f && !switched) release_anchor(stance_left);
+
+    if (switched) {
+        gait_timer  = 0.f;
+        stance_left = !stance_left;
+        begin_gait_phase();
+    }
+    bool swing_left = !stance_left;
+
+    release_anchor(swing_left);
+
+    // Search ahead of the torso in the direction of travel and traverse backwards to find a point
+    float travel   = move_dir > 0.f ? 1.f : -1.f;
+    float offset   = walking_backward() ? backward_search_offset_x : swing_search_offset_x;
+    float search_x = position().x + travel * offset;
+    scan_step_target(swing_left, search_x, search_x - travel * swing_search_back);
+
+    if (switched)
+        anchor_foot(stance_left);
+
+    float t = std::clamp(gait_timer / period, 0.f, 1.f);
+    if (walking_backward()) {
+        leg_target(stance_left) = backward_stance_pose(t);
+        leg_target(swing_left)  = backward_swing_pose(swing_left, t);
+    } else {
+        leg_target(stance_left) = walking_stance_pose(t);
+        leg_target(swing_left)  = walking_swing_pose(swing_left, t);
+    }
+}
+
+void PlayerCharacter::begin_run_cycle()
+{
+    bool stance = foot_anchored_l != foot_anchored_r ? foot_anchored_l : stance_left;
+    stance_left = stance;
+    if (!foot_anchored(stance) && grounded(stance))
+        anchor_foot(stance);
+    release_anchor(!stance);
+
+    enter_run_phase(RunPhase::Drive);
+    run_prev_vel_x = velocity().x;
+}
+
+void PlayerCharacter::enter_run_phase(RunPhase phase)
+{
+    run_phase      = phase;
+    run_phase_time = 0.f;
+}
+
+// Direction the run cycle steps in: facing, except when braking after turning around mid-run,
+// where the body is still sliding the old way
+float PlayerCharacter::run_travel_dir() const
+{
+    return (run_stopping() && velocity().x * facing_dir < 0.f) ? -facing_dir : facing_dir;
+}
+
+// How far the hip has passed over the foot along dir
+float PlayerCharacter::leg_over_foot_angle(bool left, float dir) const
+{
+    glm::vec2 foot = pe->get_position(foot_id(left));
+    glm::vec2 hip  = hip_position(left);
+    return std::atan2(dir * (hip.x - foot.x), foot.y - hip.y);
+}
+
+void PlayerCharacter::update_running(float dt)
+{
+    run_phase_time += dt;
+
+    bool stance = stance_left;
+    bool swing  = !stance;
+
+    // Leave Drive once the leg is far enough behind or as soon as the anchor is lost (pin broke),
+    if (run_phase == RunPhase::Drive &&
+        (!foot_anchored(stance) || leg_over_foot_angle(stance, run_travel_dir()) >= run_release_angle)) {
+        bool pushed_off = foot_pinned(stance);
+        release_anchor(stance);
+        if (pushed_off)
+            for (uint32_t id : limbs)
+                if (id != INVALID && pe->world.bodies[id].inv_mass > 0.f) {
+                    // this could be used to get a bouncy run - for now set to 0
+                    float& vy = pe->world.bodies[id].velocity.y;
+                    vy = std::min(vy, -run_lift_speed);
+                }
+        enter_run_phase(RunPhase::Flight);
+    }
+    if (run_phase == RunPhase::Flight && run_phase_time >= run_flight_delay)
+        enter_run_phase(RunPhase::Reach);
+    if (run_phase == RunPhase::Reach) {
+        float search_x = position().x + run_travel_dir() * run_step_ahead * std::max(run_stop_scale(), 0.3f);
+        scan_step_target(swing, search_x, search_x - run_travel_dir() * swing_search_back);
+
+        // Require real ground contact: anchoring a foot that's merely near its target lets
+        // Drive run (and lift) while still airborne
+        if (grounded(swing)) {
+            if (!foot_near_step_target(swing))
+                step_target(swing).x = pe->get_position(foot_id(swing)).x;
+            anchor_foot(swing);
+            stance_left = swing;
+            stance      = swing;
+            swing       = !swing;
+            enter_run_phase(RunPhase::Drive);
+        }
+    }
+
+    LegPose forward_tucked = { -facing_dir * run_swing_thigh_angle,
+                               -facing_dir * run_swing_thigh_angle + facing_dir * run_tuck_knee_bend };
+    float   back_thigh      = leg_angle(stance).thigh;
+    LegPose trailing_tucked = { back_thigh, back_thigh + facing_dir * run_tuck_knee_bend };
+
+    switch (run_phase) {
+    case RunPhase::Drive: {
+        glm::vec2 lead = glm::vec2(facing_dir * run_drive_lead, -run_drive_lift);
+        if (run_stopping()) {
+            float speed = std::max(std::abs(velocity().x) - run_stop_decel * dt, 0.f);
+            lead = glm::vec2(run_travel_dir() * speed * dt, 0.f);
+        }
+        leg_target(stance) = solve_leg_ik(hip_position(stance) + lead, ankle_position(stance), facing_dir);
+        leg_target(swing)  = forward_tucked;
+        break;
+    }
+    case RunPhase::Flight:
+        leg_target(swing)  = forward_tucked;
+        leg_target(stance) = trailing_tucked;   
+        break;
+    case RunPhase::Reach: {
+        leg_target(swing)  = reach_step_target(hip_position(swing), swing);
+        leg_target(stance) = trailing_tucked;
+        break;
+    }
+    }
+
+    run_speed_control(dt);
+}
+
+// 1 while running normally; while braking, shrinks with speed so strides shorten
+float PlayerCharacter::run_stop_scale() const
+{
+    if (!run_stopping() || run_speed_target <= 0.f) return 1.f;
+    return std::clamp(std::abs(velocity().x) / run_speed_target, 0.f, 1.f);
+}
+
+void PlayerCharacter::run_speed_control(float dt)
+{
+    if (dt <= 0.f) return;
+
+    float mass = 0.f, vel_x = 0.f;
+    for (uint32_t id : limbs) {
+        if (id == INVALID) continue;
+        const RigidBody& rb = pe->world.bodies[id];
+        mass  += rb.mass;
+        vel_x += rb.mass * rb.velocity.x;
+    }
+    if (mass <= 0.f) return;
+    vel_x /= mass;
+
+    // Derivative on velocity rather than error, so switching the target to 0 when stopping doesn't kick
+    float target    = run_stopping() ? 0.f : facing_dir * run_speed_target;
+    float error     = target - vel_x;
+    float derror    = -(vel_x - run_prev_vel_x) / dt;
+    run_prev_vel_x  = vel_x;
+
+    float max_accel = run_stopping() ? run_stop_decel : run_max_accel;
+    float accel     = std::clamp(run_speed_kp * error + run_speed_kd * derror, -max_accel, max_accel);
+    for (uint32_t id : limbs)
+        if (id != INVALID && pe->world.bodies[id].inv_mass > 0.f)
+            pe->world.bodies[id].velocity.x += accel * dt;
+}
+
+void PlayerCharacter::drive_legs(float dt)
+{
+    float torso_angle = rotation();
+    bool  in_air      = anim_state == AnimationState::Jumping || anim_state == AnimationState::Airborne;
+    float speed       = in_air                                 ? air_leg_angle_speed
+                      : anim_state != AnimationState::Walking ? max_leg_angle_speed
+                      : running_backward()                     ? backward_run_leg_angle_speed
+                                                               : walk_leg_angle_speed;
+    float max_d       = speed * dt;
+
+    for (bool left : { true, false }) {
+        LegPose&       angle  = leg_angle(left);
+        const LegPose& target = leg_target(left);
+        step_leg_angle(angle.thigh, target.thigh, max_d);
+        step_leg_angle(angle.lower, target.lower, max_d);
+
+        // point toes when running, flatten before landing
+        float& foot = foot_angle(left);
+        bool   running = anim_state == AnimationState::Running;
+        if (running && foot_pinned(left)) {
+            foot = wrap_angle(pe->world.bodies[foot_id(left)].position.z);
+        } else {
+            bool  reaching    = running && run_phase == RunPhase::Reach && left != stance_left;
+            float foot_target = (running && !reaching) ? -facing_dir * run_foot_point_angle : 0.f;
+            step_leg_angle(foot, foot_target, foot_angle_speed * dt);
+        }
+
+        animate_leg_fk(left ? Joint::HipL   : Joint::HipR,
+                       left ? Joint::KneeL  : Joint::KneeR,
+                       left ? Joint::AnkleL : Joint::AnkleR,
+                       torso_angle, angle.thigh, angle.lower, foot);
+    }
+}
+
+void PlayerCharacter::handle_jump(float dt)
+{
+    if (jump_launched || anim_state == AnimationState::Jumping) return;
+
+    if (!grounded_l && !grounded_r) {
+        will_jump      = false;
+        jump_dir_timer = 0.0f;
+        jump_timer     = 0.0f;
+        return;
+    }
+
+    if (jump || will_jump) {
+        jump_timer += dt;
+        if (jump_timer >= 0.0f) jump_dir_timer += dt * move_dir;
+    }
+    if (!jump && jump_timer > 0.0f)       will_jump = true;
+    if (jump_timer >= MAX_JUMP_CUTOFF)    will_jump = true;
+
+    // running squat 
+    if (anim_state == AnimationState::JumpSquat && squat_moving) {
+        float travel = squat_vel_x >= 0.f ? 1.f : -1.f;
+        if (!foot_anchored(squat_left) ||
+            leg_over_foot_angle(squat_left, travel) >= run_release_angle) {
+            will_jump  = true;
+            jump_timer = std::max(jump_timer, MIN_JUMP_CUTOFF);
+        }
+    }
+
+    if (will_jump && jump_timer >= MIN_JUMP_CUTOFF)
+        launch_jump();
+}
+
+// Mass-weighted horizontal velocity of the movable limbs
+float PlayerCharacter::com_velocity_x() const
+{
+    float mass = 0.f, vel_x = 0.f;
+    for (uint32_t id : limbs) {
+        if (id == INVALID || pe->world.bodies[id].inv_mass <= 0.f) continue;
+        mass  += pe->world.bodies[id].mass;
+        vel_x += pe->world.bodies[id].mass * pe->world.bodies[id].velocity.x;
+    }
+    return mass > 0.f ? vel_x / mass : 0.f;
+}
+
+// Shift every movable limb's horizontal velocity by the same amount
+void PlayerCharacter::add_velocity_x(float dv)
+{
+    for (uint32_t id : limbs)
+        if (id != INVALID && pe->world.bodies[id].inv_mass > 0.f)
+            pe->world.bodies[id].velocity.x += dv;
+}
+
+void PlayerCharacter::launch_jump()
+{
+    glm::vec2 impulse = jump_impulse * glm::vec2(JUMP_RATIO.x * jump_dir_timer, -JUMP_RATIO.y * jump_timer);
+
+    release_anchor(true);
+    release_anchor(false);
+
+    float total_mass = 0.f;
+    for (uint32_t id : limbs)
+        if (id != INVALID) total_mass += pe->world.bodies[id].mass;
+    if (total_mass > 0.f) {
+        glm::vec2 dv = impulse / total_mass;
+        for (uint32_t id : limbs)
+            if (id != INVALID) pe->set_velocity(id, pe->get_velocity(id) + dv);
+    }
+
+    will_jump      = false;
+    jump_timer     = -JUMP_DELAY;
+    jump_dir_timer = 0.0f;
+    jump_launched  = true;
+}
+
+void PlayerCharacter::update(float dt, bool apply_controls)
+{
+    if (!is_valid()) return;
+    if (apply_controls)
+        update_facing();
+
+    grounded_l = foot_grounded(true);
+    grounded_r = foot_grounded(false);
+    air_time   = (grounded_l || grounded_r) ? 0.f : air_time + dt;
+
+    if (apply_controls)
+        handle_jump(dt);
+
+    update_animation_state(dt);
+
+    bool in_air = anim_state == AnimationState::Jumping || anim_state == AnimationState::Airborne;
+    fall_time   = (in_air && velocity().y >= 0.f) ? fall_time + dt : 0.f;   
+
+    if (anim_state == AnimationState::Standing)
+        update_standing_anchors();
+
+    sync_foot_pin(true);
+    sync_foot_pin(false);
+
+    // While running, traction comes from pinning; a free foot with friction just snags on the ground.
+    for (bool left : { true, false }) {
+        bool slick = (anim_state == AnimationState::Running && !foot_pinned(left))
+                  || anim_state == AnimationState::JumpSquat || anim_state == AnimationState::Jumping;
+        pe->world.bodies[foot_id(left)].friction = slick ? 0.f : (left ? foot_friction_l : foot_friction_r);
+    }
+
+    leg_target_l = leg_angle_l;
+    leg_target_r = leg_angle_r;
+
+    if (apply_controls)
+        set_animation_goals(dt);
+
+    drive_legs(dt);
+
+    animate_left_arm();
+    animate_right_arm();
+    apply_joint_goals();
+}
+
+glm::vec2 PlayerCharacter::position() const { return pe->get_position(limbs[(size_t)Limb::Torso]); }
+glm::vec2 PlayerCharacter::velocity() const { return pe->get_velocity(limbs[(size_t)Limb::Torso]); }
+float     PlayerCharacter::rotation() const { return pe->get_rotation(limbs[(size_t)Limb::Torso]); }

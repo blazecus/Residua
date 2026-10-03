@@ -165,6 +165,8 @@ public:
     void remove_body(uint32_t idx);
     void clear();
 
+    void mirror_body_x(uint32_t idx);
+
     std::optional<uint32_t> body_at(glm::vec2 world_pos) const;
 
     void dispatch(VkCommandBuffer cmd, float dt);

@@ -46,6 +46,12 @@ layout(push_constant) uniform PushConstants {
     uint index_offset;
 };
 
+// Average of the 2x2 texels whose top-left is (x, y)
+float sdf_at_pixel_center(uint offset, uint w, uint x, uint y) {
+    uint i = offset + y * w + x;
+    return 0.25 * (sdf_data[i] + sdf_data[i + 1u] + sdf_data[i + w] + sdf_data[i + w + 1u]);
+}
+
 void main() {
     if (gl_WorkGroupID.x >= body_count) return;
     uint body_idx = active_indices[index_offset + gl_WorkGroupID.x];
@@ -77,7 +83,9 @@ void main() {
 
         const uint SDF_SCALE = 2;
         uint sdf_w = body.body_w * SDF_SCALE;
-        uint sdf_y = ly * SDF_SCALE;
+        // The sprite pixel's center falls between the middle SDF texels of its block;
+        // averaging those gives the distance at the center (symmetric under mirroring)
+        uint sdf_y = ly * SDF_SCALE + SDF_SCALE / 2u - 1u;
 
         vec2 r = world_pos - body.position;
         vec2 rb_vel = body.velocity + vec2(-body.angular_velocity * r.y,
@@ -89,8 +97,7 @@ void main() {
             if (color.a <= 0.0) continue;
 
             uint sdf_lx = (body.flip_h != 0u) ? (body.body_w - 1u - lx) : lx;
-            uint sdf_x  = sdf_lx * SDF_SCALE;
-            float sdf_val = sdf_data[body.sdf_offset + sdf_y * sdf_w + sdf_x];
+            float sdf_val = sdf_at_pixel_center(body.sdf_offset, sdf_w, sdf_lx * SDF_SCALE + SDF_SCALE / 2u - 1u, sdf_y);
             float t = clamp(-sdf_val / 5.0, 0.0, 1.0);
             color.rgb = mix(vec3(1.0), vec3(0.1, 0.4, 1.0), t);
 
@@ -102,8 +109,7 @@ void main() {
         } else {
             // Static/SDF-only body: use SDF sign to find solid pixels,
             // write only vel_image (body stays invisible on screen).
-            uint  sdf_x   = lx * SDF_SCALE;
-            float sdf_val = sdf_data[body.sdf_offset + sdf_y * sdf_w + sdf_x];
+            float sdf_val = sdf_at_pixel_center(body.sdf_offset, sdf_w, lx * SDF_SCALE + SDF_SCALE / 2u - 1u, sdf_y);
             if (sdf_val > 0.0) continue;
             imageStore(vel_image, out_coord, vec4(rb_vel, sdf_val, 1.0));
         }

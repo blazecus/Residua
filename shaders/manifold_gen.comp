@@ -49,6 +49,7 @@ float sample_sdf_pix(uint offset, uint w, uint h, int x, int y) {
 }
 
 float sample_sdf(uint offset, uint w, uint h, vec2 p) {
+    p -= 0.5;  
     int x0 = int(floor(p.x)), y0 = int(floor(p.y));
     int x1 = x0 + 1, y1 = y0 + 1;
     float fx = p.x - float(x0), fy = p.y - float(y0);

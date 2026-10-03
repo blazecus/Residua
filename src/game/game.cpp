@@ -34,7 +34,7 @@ void Game::init() {
     ui_manager.init(&scene_manager, &physics_engine, &engine);
     engine.ui_callback = [this]() { ui_manager.draw(); };
 
-    scene_manager.load(0);
+    scene_manager.load(3); 
 
     lastFrame = std::chrono::system_clock::now();
 }
